@@ -5,7 +5,12 @@ datagen:
   benchmarks: [tpcc]        # Benchmarks include: [auctionmark, epinions, seats, sibench, smallbank, tatp, tpcc, tpch, twitter, voter, wikipedia, ycsb]
   log_level: DEBUG
   param_sweep:
-    scalefactor: [0.01, 0.1]
+    scalefactor: [1]
     terminals: [1]
     works.work.rate: [10000]
     works.work.time: [60]
+  knob_sweep_enabled: True
+  knob_change_warmup: 5
+  knob_sweep:
+    work_mem: [1024, 2048, 4096, 8192, 16384]
+    hash_mem_multiplier: [0.25, 0.5, 1.0, 2.0, 4.0]

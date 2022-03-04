@@ -9,8 +9,41 @@ from plumbum import cli
 
 from behavior import BENCHDB_TO_TABLES
 from evaluation.utils import inject_param_xml, param_sweep_space, parameter_sweep
+import knob_change.init_knob_change_log
 
 logger = logging.getLogger(__name__)
+
+def knob_sweep_callback(knobs, closure):
+    """
+    Callback to knob exploration sweeping.
+
+    For each knob value enumeration, save a separate DBMS configuration file.
+    Inject the altered knob values to the DMBS file.
+    Return the path name of the configuration file.
+
+    Parameters:
+    -----------
+    knobs : List[Tuple[List[str], Any]]
+        The knob enumeration.
+    closure : Dict[str, Any]
+        Closure environment passed from caller.
+
+    Returns:
+    -----------
+    suffixed_dbms_config_file: str
+        Resolved path of injected DBMS configuration file.
+    """
+
+    results_dir = closure["results_dir"]
+    postgresql_config_file = closure["postgresql_config_file"]
+    # The knob configuration file name is a concatenation of knobs and values.
+    knob_file_name = "_".join([knob_name[0] + "_" + str(value) for knob_name, value in knobs])
+    benchbase_postgresql_config_file = Path(results_dir / f"{knob_file_name}.conf")
+    shutil.copy(postgresql_config_file, benchbase_postgresql_config_file)
+    # Change the content of knobs.
+    inject_knob_exploration(benchbase_postgresql_config_file.as_posix(), knobs)
+
+    return benchbase_postgresql_config_file.resolve()
 
 
 def datagen_sweep_callback(parameters, closure):
@@ -34,6 +67,8 @@ def datagen_sweep_callback(parameters, closure):
     postgresql_config_file = closure["postgresql_config_file"]
     pg_analyze = closure["pg_analyze"]
     pg_prewarm = closure["pg_prewarm"]
+    knob_sweep_enabled = closure["knob_sweep_enabled"]
+    knob_explore_space = closure["knob_explore_space"]
 
     # The suffix is a concatenation of parameter names and their values.
     param_suffix = "_".join([name_level[-1] + "_" + str(value) for name_level, value in parameters])
@@ -49,10 +84,23 @@ def datagen_sweep_callback(parameters, closure):
 
     # Copy the default postgresql.conf file.
     # TODO(wz2): Rewrite the postgresql.conf based on knob tweaks and modify the param_suffix above.
-    benchbase_postgresql_config_file = Path(results_dir / "postgresql.conf")
-    shutil.copy(postgresql_config_file, benchbase_postgresql_config_file)
-    pg_configs = [str(benchbase_postgresql_config_file.resolve())]
+    # If knob sweeping is enabled, generate a list of different configuration files.
+    if knob_sweep_enabled:
+        knob_sweep_closure = {
+            "postgresql_config_file": postgresql_config_file,
+            "results_dir": results_dir,
+        }
+        pg_configs = parameter_sweep(knob_explore_space, knob_sweep_callback, knob_sweep_closure)
+        # The same benchbase configuration will be used.
+        benchbase_configs = benchbase_configs * len(pg_configs)
+    else:
+        benchbase_postgresql_config_file = Path(results_dir / "postgresql.conf")
+        shutil.copy(postgresql_config_file, benchbase_postgresql_config_file)
+        pg_configs = [str(benchbase_postgresql_config_file.resolve())]
 
+    # create the separate file to record global knob changes.
+    knob_change_log = Path(results_dir / "benchbase_config.xml").as_posix()
+    init_knob_change_log(knob_change_log, knob_explore_space)
     # Create the config.yaml file
     config = {
         "benchmark": benchmark,
@@ -60,6 +108,7 @@ def datagen_sweep_callback(parameters, closure):
         "pg_prewarm": pg_prewarm,
         "pg_configs": pg_configs,
         "benchbase_configs": benchbase_configs,
+        "knob_change_log": knob_change_log,
     }
 
     with (results_dir / "config.yaml").open("w") as f:
@@ -112,6 +161,7 @@ class GenerateWorkloadsCLI(cli.Application):
 
             # Build sweeping space
             ps_space = param_sweep_space(self.config["param_sweep"])
+            knob_explore_space = param_sweep_space(self.config["knob_sweep"])
             # For each benchmark, ...
             for benchmark in benchmarks:
                 benchbase_config_path = self.dir_benchbase_config / f"{benchmark}_config.xml"
@@ -124,6 +174,8 @@ class GenerateWorkloadsCLI(cli.Application):
                     "postgresql_config_file": self.postgresql_config_file,
                     "pg_prewarm": self.config["pg_prewarm"],
                     "pg_analyze": self.config["pg_analyze"],
+                    "knob_sweep_enabled": self.config["knob_sweep_enabled"],
+                    "knob_explore_space": knob_explore_space,
                 }
                 parameter_sweep(ps_space, datagen_sweep_callback, closure)
 

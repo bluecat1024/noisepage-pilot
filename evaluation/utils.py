@@ -57,6 +57,58 @@ def param_sweep_space(ps_dist):
 
     return ps_space
 
+def inject_knob_exploration(file_path, knobs):
+    """
+    Inject and re-write Postgres file configurations given knobs.
+
+    Parameters:
+    -----------
+    file_path : str
+        Configuration file path to inject.
+    knobs : List[Tuple(List[str], Any)]
+        The list of parameter names and values to inject.
+    """
+
+    knob_value_map = dict()
+    for name, value in knobs:
+        knob_value_map[name[0]] = value
+
+    new_line_list = []
+    with open(file_path, 'r') as fr:
+        line_list = list(fr.readlines())
+        # Process the DBMS configuration file.
+        for line in line_list:
+            tokens = line.strip().split()
+            filtered_tokens = []
+            for token in tokens:
+                if token[0] == '#':
+                    break
+                filtered_tokens.append(token)
+
+            if len(filtered_tokens) != 3 or filtered_tokens[1] != '=':
+                new_line_list.append(line)
+            else:
+                knob_name = filtered_tokens[0]
+                # Replace value if already in configuration.
+                if knob_name in knob_value_map:
+                    new_line = f"{knob_name} = {knob_value_map[knob_name]}\n"
+                    del knob_value_map[knob_name]
+                else:
+                    new_line = line
+
+                new_line_list.append(new_line)
+    
+    # Append the knob settings to tail of the new file.
+    for knob_name, value in knob_value_map.items():
+        new_line = f"{knob_name} = {value}\n"
+        new_line_list.append(new_line)
+
+    # Flush to the new file.
+    with open(file_path, 'w') as fw:
+        for line in new_line_list:
+            fw.write(line)
+    
+
 def inject_param_xml(file_path, parameters):
     '''Inject and re-write XML file with given parameters.
 
@@ -94,12 +146,19 @@ def parameter_sweep(ps_space, f, closure=None):
         and closure dict.
     closure : Dict[str, Any]
         Closure environment passed from caller.
+
+    Returns:
+    ------------
+    return_values : List[Any]
+        A list containing the return value of all invocations of callback.
     '''
     assert(len(ps_space) > 0), 'Parameter space should not be empty.\nCheck the configuration file.'
 
     if closure is None:
         closure = {}
 
+    # The return value list.
+    return_values = []
     # Maintain the traverse states. Initial to the first value on level 0.
     cursor_stack = [-1]
     parameters = []
@@ -119,10 +178,12 @@ def parameter_sweep(ps_space, f, closure=None):
         parameters.append((name_level, value))
 
         if len(cursor_stack) >= len(ps_space):
-            f(parameters, closure)
+            return_values.append(f(parameters, closure))
             del parameters[-1]
         else:
             cursor_stack.append(-1)
+
+    return return_values
 
 if __name__ == '__main__':
     # This standalone block of code is only used for tests.

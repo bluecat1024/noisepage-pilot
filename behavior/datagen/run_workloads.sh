@@ -198,6 +198,9 @@ for mode in "${modes[@]}"; do
                 # recovery should reload the entire benchbase database state.
             fi
 
+            # Insert the knob log to the knob change file.
+            python3 behavior/datagen/knob_change.py "${knob_change_log}" "${postgresql_path}"
+
             # shellcheck disable=2154 # populated by niet
             if [ "$pg_prewarm" != 'False' ];
             then
