@@ -14,7 +14,7 @@ def task_tscout_init():
     TScout: attach TScout to a running NoisePage instance
     """
 
-    def start_tscout(output_dir, wait_time, append):
+    def start_tscout(output_dir, wait_time, append, decoupled):
         if output_dir is None:
             print("Unable to start tscout without an output directory")
             return False
@@ -28,7 +28,7 @@ def task_tscout_init():
         dir_tscout = BUILD_PATH / "cmudb/tscout"
         os.chdir(dir_tscout)
 
-        arguments = ["tscout.py", postmaster_pid, "--outdir", dir_tscout_output]
+        arguments = ["tscout.py", postmaster_pid, "--outdir", dir_tscout_output, "--decoupled", decoupled]
         if append == "True":
             arguments.append("--append")
 
@@ -58,6 +58,12 @@ def task_tscout_init():
                 "long": "wait_time",
                 "help": "Time to wait (seconds) after TScout has been started.",
                 "default": 5,
+            },
+            {
+                "name": "decoupled",
+                "long": "decoupled",
+                "help": "Whether to enable decoupled mode.",
+                "default": 0,
             },
             {"name": "append", "long": "append", "help": "Whether to pass --append to TScout.", "default": False},
         ],

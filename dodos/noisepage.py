@@ -198,6 +198,87 @@ def task_noisepage_hutch_install():
         "verbosity": VERBOSITY_DEFAULT,
     }
 
+def task_noisepage_tscout_decouple():
+    """
+    NoisePage: install hutch extension to support EXPLAIN (format tscout).
+    """
+    sql_list = [
+        # Note that this will overwrite any existing settings of shared_preload_libraries.
+        "ALTER SYSTEM SET tscout_feature_decoupled = on",
+    ]
+
+    return {
+        "actions": [
+            lambda: os.chdir(ARTIFACTS_PATH),
+            *[
+                f'PGPASSWORD={DEFAULT_PASS} ./psql --dbname={DEFAULT_DB} --username={DEFAULT_USER} --command="{sql}"'
+                for sql in sql_list
+            ],
+            lambda: local["./pg_ctl"]["restart", "-D", DEFAULT_PGDATA].run_fg(),
+            # Reset working directory.
+            lambda: os.chdir(doit.get_initial_workdir()),
+        ],
+        "uptodate": [False],
+        "file_dep": [ARTIFACT_postgres],
+        "verbosity": VERBOSITY_DEFAULT,
+    }
+
+def task_noisepage_qcache_install():
+    """
+    NoisePage: install qcache extension to enable serialized
+    query store for a certain database.
+    """
+
+    sql_list1 = [
+        "ALTER SYSTEM SET allow_system_table_mods = ON",
+    ]
+
+    sql_list2 = [
+        "DROP TABLE IF EXISTS pg_catalog.pg_qcache",
+        """CREATE TABLE pg_catalog.pg_qcache(
+            queryid bigint,
+            dbid integer,
+            procid integer,
+            timestamp bigint,
+            features text,
+            primary key(queryid, dbid, procid)
+            )""",
+        "ALTER SYSTEM SET shared_preload_libraries='qcache'",
+    ]
+
+    def run_query_in_db(dbname):
+        for sql in sql_list1:
+            os.system(f'PGPASSWORD={DEFAULT_PASS} ./psql --dbname={dbname} --username={DEFAULT_USER} --command="{sql}"')
+        local["./pg_ctl"]["restart", "-D", DEFAULT_PGDATA].run_fg()
+        for sql in sql_list2:
+            os.system(f'PGPASSWORD={DEFAULT_PASS} ./psql --dbname={dbname} --username={DEFAULT_USER} --command="{sql}"')
+        local["./pg_ctl"]["restart", "-D", DEFAULT_PGDATA].run_fg()
+
+
+    return {
+        "actions": [
+            lambda: os.chdir(BUILD_PATH),
+            # Compile and install qcache.
+            "doit qcache_install",
+            # Alter system table to allow modification.
+            lambda: os.chdir(ARTIFACTS_PATH),
+            run_query_in_db,
+            # Reset working directory.
+            lambda: os.chdir(doit.get_initial_workdir()),
+        ],
+        "uptodate": [False],
+        "file_dep": [ARTIFACT_postgres],
+        "verbosity": VERBOSITY_DEFAULT,
+        "params": [
+            {
+                "name": "dbname",
+                "long": "dbname",
+                "help": "The database name where to install qcache.",
+                "default": DEFAULT_DB,
+            },
+        ],
+    }
+
 
 def task_noisepage_enable_logging():
     """

@@ -136,6 +136,8 @@ psql=$(realpath "${PSQL_LOCATION}")
 pkill -i postgres || true
 pkill -i tscout || true
 
+# Decoupled parameter.
+decoupled=1
 modes=("train" "eval")
 for mode in "${modes[@]}"; do
     output_folder="${OUTPUT_DIRECTORY}/experiment-${ts}/${mode}"
@@ -177,6 +179,10 @@ for mode in "${modes[@]}"; do
                 # If we're executing a new experiment, then we want to completely
                 # the database instance. This is done by invoking `noisepage_init`.
                 doit noisepage_init --config="${postgresql_path}"
+                if [ ${decoupled} != "0" ];
+                then
+                    doit noisepage_tscout_decouple
+                fi
                 doit benchbase_bootstrap_dbms
 
                 # Create the database and load the database
@@ -191,6 +197,12 @@ for mode in "${modes[@]}"; do
 
                 # Then restart the instance.
                 ${pg_ctl} start -D "${PGDATA_LOCATION}"
+
+                # Install QCache before running workloads.
+                if [ ${decoupled} != "0" ];
+                then
+                    doit noisepage_qcache_install --dbname=benchbase
+                fi
             else
                 doit noisepage_swap_config --config="${postgresql_path}"
 
@@ -219,7 +231,7 @@ for mode in "${modes[@]}"; do
             # Initialize TScout. We currently don't have a means by which to check whether
             # TScout has successfully attached to the instance. As such, we (wait) 5 seconds.
             append=$( [[ $i != "0" ]] && echo "True" || echo "False" )
-            doit tscout_init --output_dir="${benchmark_output}" --wait_time=5 --append="${append}"
+            doit tscout_init --output_dir="${benchmark_output}" --wait_time=5 --append="${append}" --decoupled="${decoupled}"
 
             # Execute the benchmark
             doit benchbase_run --benchmark="${benchmark}" --config="${benchbase_config_path}" --args="--execute=true"
