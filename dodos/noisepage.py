@@ -170,32 +170,85 @@ def task_noisepage_swap_config():
     }
 
 
-def task_noisepage_hutch_install():
+def task_noisepage_qss_install():
     """
-    NoisePage: install hutch extension to support EXPLAIN (format tscout).
+    NoisePage: install qss extension to enable query state collection for a specific database.
     """
-    sql_list = [
-        # Note that this will overwrite any existing settings of shared_preload_libraries.
-        "ALTER SYSTEM SET shared_preload_libraries='hutch_extension'",
+
+    sql_list1 = [
+        "ALTER SYSTEM SET allow_system_table_mods = ON",
     ]
+
+    sql_list2 = [
+        "DROP TABLE IF EXISTS pg_catalog.pg_qss_plans",
+        "DROP TABLE IF EXISTS pg_catalog.pg_qss_stats",
+        """CREATE UNLOGGED TABLE pg_catalog.pg_qss_plans(
+            query_id bigint,
+            generation integer,
+            db_id integer,
+            pid integer,
+            statement_timestamp bigint,
+            features text,
+            primary key(query_id, generation, db_id, pid)
+            )""",
+        """CREATE UNLOGGED TABLE pg_catalog.pg_qss_stats(
+            query_id bigint,
+            db_id integer,
+            pid integer,
+            statement_timestamp bigint,
+            plan_node_id int,
+
+            counter0 float8,
+            counter1 float8,
+            counter2 float8,
+            counter3 float8,
+            counter4 float8,
+            counter5 float8,
+            counter6 float8,
+            counter7 float8,
+            counter8 float8,
+            counter9 float8,
+            params text
+            )""",
+        "ALTER SYSTEM SET shared_preload_libraries='qss'",
+        "ALTER SYSTEM SET qss_capture_enabled = ON",
+        "ALTER SYSTEM SET qss_capture_exec_stats = ON",
+        "ALTER SYSTEM SET qss_capture_query_runtime = ON",
+        "DROP EXTENSION IF EXISTS qss",
+        "CREATE EXTENSION qss",
+    ]
+
+    def run_query_in_db(dbname):
+        for sql in sql_list1:
+            os.system(f'PGPASSWORD={DEFAULT_PASS} ./psql --dbname={dbname} --username={DEFAULT_USER} --command="{sql}"')
+        local["./pg_ctl"]["restart", "-D", DEFAULT_PGDATA, "-m", "smart"].run_fg(retcode=None)
+        for sql in sql_list2:
+            os.system(f'PGPASSWORD={DEFAULT_PASS} ./psql --dbname={dbname} --username={DEFAULT_USER} --command="{sql}"')
+        local["./pg_ctl"]["restart", "-D", DEFAULT_PGDATA, "-m", "smart"].run_fg(retcode=None)
+
 
     return {
         "actions": [
             lambda: os.chdir(BUILD_PATH),
-            # Compile and install Hutch.
-            "doit hutch_install",
+            # Compile and install qss.
+            "doit qss_install",
+            # Alter system table to allow modification.
             lambda: os.chdir(ARTIFACTS_PATH),
-            *[
-                f'PGPASSWORD={DEFAULT_PASS} ./psql --dbname={DEFAULT_DB} --username={DEFAULT_USER} --command="{sql}"'
-                for sql in sql_list
-            ],
-            lambda: local["./pg_ctl"]["restart", "-D", DEFAULT_PGDATA].run_fg(),
+            run_query_in_db,
             # Reset working directory.
             lambda: os.chdir(doit.get_initial_workdir()),
         ],
         "uptodate": [False],
         "file_dep": [ARTIFACT_postgres],
         "verbosity": VERBOSITY_DEFAULT,
+        "params": [
+            {
+                "name": "dbname",
+                "long": "dbname",
+                "help": "The database name where to install qss.",
+                "default": DEFAULT_DB,
+            },
+        ],
     }
 
 
@@ -216,7 +269,7 @@ def task_noisepage_enable_logging():
                 f'PGPASSWORD={DEFAULT_PASS} ./psql --dbname={DEFAULT_DB} --username={DEFAULT_USER} --command="{sql}"'
                 for sql in sql_list
             ],
-            lambda: local["./pg_ctl"]["restart", "-D", DEFAULT_PGDATA].run_fg(),
+            lambda: local["./pg_ctl"]["restart", "-D", DEFAULT_PGDATA, "-m", "smart"].run_fg(),
             # Reset working directory.
             lambda: os.chdir(doit.get_initial_workdir()),
         ],
@@ -241,7 +294,7 @@ def task_noisepage_disable_logging():
                 f'PGPASSWORD={DEFAULT_PASS} ./psql --dbname={DEFAULT_DB} --username={DEFAULT_USER} --command="{sql}"'
                 for sql in sql_list
             ],
-            lambda: local["./pg_ctl"]["restart", "-D", DEFAULT_PGDATA].run_fg(),
+            lambda: local["./pg_ctl"]["restart", "-D", DEFAULT_PGDATA, "-m", "smart"].run_fg(),
             # Reset working directory.
             lambda: os.chdir(doit.get_initial_workdir()),
         ],

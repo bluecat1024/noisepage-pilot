@@ -1,5 +1,8 @@
 from __future__ import annotations
+from enum import Enum
 
+# A mapping from supported benchmark to tables used in the benchmark. This mapping is primarily
+# used by doit behavior_pg_analyze_benchmark.
 BENCHDB_TO_TABLES = {
     "tpcc": [
         "warehouse",
@@ -85,103 +88,130 @@ BENCHDB_TO_TABLES = {
     "ycsb": ["usertable"],
 }
 
+
 # This list must be kept up to date with the OU definitions in cmu-db/postgres.
 # OU_DEFS is defined in: https://github.com/cmu-db/postgres/blob/pg14/cmudb/tscout/model.py
-PLAN_NODE_NAMES = [
-    "Agg",
-    "Append",
-    "BitmapAnd",
-    "BitmapHeapScan",
-    "BitmapIndexScan",
-    "BitmapOr",
-    "CteScan",
-    "CustomScan",
-    "ForeignScan",
-    "FunctionScan",
-    "Gather",
-    "GatherMerge",
-    "Group",
-    "Hash",
-    "HashJoinImpl",
-    "IncrementalSort",
-    "IndexOnlyScan",
-    "IndexScan",
-    "Limit",
-    "LockRows",
-    "Material",
-    "Memoize",
-    "MergeAppend",
-    "MergeJoin",
-    "ModifyTable",
-    "NamedTuplestoreScan",
-    "NestLoop",
-    "ProjectSet",
-    "RecursiveUnion",
-    "Result",
-    "SampleScan",
-    "SeqScan",
-    "SetOp",
-    "Sort",
-    "SubPlan",
-    "SubqueryScan",
-    "TableFuncScan",
-    "TidScan",
-    "Unique",
-    "ValuesScan",
-    "WindowAgg",
-    "WorkTableScan",
-]
-
-BASE_TARGET_COLS = [
-    "cpu_cycles",
-    "instructions",
-    "cache_references",
-    "cache_misses",
-    "ref_cpu_cycles",
-    "network_bytes_read",
-    "network_bytes_written",
-    "disk_bytes_read",
-    "disk_bytes_written",
-    "memory_bytes",
-    "elapsed_us",
-]
-
-# The set of columns to standardize the input data's columns on. A column that ends with any
-# of the values defined below is renamed to the defined value.
-STANDARDIZE_COLUMNS: list[str] = [
-    "query_id",
-    "plan_node_id",
-    "left_child_plan_node_id",
-    "right_child_plan_node_id",
-    "startup_cost",
-    "total_cost",
-    "start_time",
-    "end_time",
-    "statement_timestamp",
-    "pid",
-]
+class OperatingUnit(Enum):
+    Agg = 0
+    Append = 1
+    BitmapAnd = 2
+    BitmapHeapScan = 3
+    BitmapIndexScan = 4
+    BitmapOr = 5
+    CteScan = 6
+    CustomScan = 7
+    ForeignScan = 8
+    FunctionScan = 9
+    Gather = 10
+    GatherMerge = 11
+    Group = 12
+    Hash = 13
+    HashJoinImpl = 14
+    IncrementalSort = 15
+    IndexOnlyScan = 16
+    IndexScan = 17
+    Limit = 18
+    LockRows = 19
+    Material = 20
+    Memoize = 21
+    MergeAppend = 22
+    MergeJoin = 23
+    ModifyTableInsert = 24
+    ModifyTableUpdate = 25
+    ModifyTableDelete = 26
+    ModifyTableIndexInsert = 27
+    AfterQueryTrigger = 28
+    NamedTuplestoreScan = 29
+    NestLoop = 30
+    ProjectSet = 31
+    RecursiveUnion = 32
+    Result = 33
+    SampleScan = 34
+    SeqScan = 35
+    SetOp = 36
+    Sort = 37
+    SubPlan = 38
+    SubqueryScan = 39
+    TableFuncScan = 40
+    TidScan = 41
+    TidRangeScan = 42
+    Unique = 43
+    ValuesScan = 44
+    WindowAgg =  45
+    WorkTableScan = 46
+    DestReceiverRemote = 47
 
 
-def standardize_input_data(df):
-    """
-    Standardizes input data for either model inference or for the data diff/model
-    training pipeline. Function remaps non-target input columns that are suffixed
-    by a column in STANDARDIZE_COLUMNS
+class Targets(Enum):
+    CPU_CYCLES = "cpu_cycles"
+    INSTRUCTIONS = "instructions"
+    CACHE_REFERENCES = "cache_references"
+    CACHE_MISSES = "cache_misses"
+    REF_CPU_CYLES = "ref_cpu_cycles"
+    NETWORK_BYTES_READ = "network_bytes_read"
+    NETWORK_BYTES_WRITTEN = "network_bytes_written"
+    DISK_BYTES_READ = "disk_bytes_read"
+    DISK_BYTES_WRITTEN = "disk_bytes_written"
+    MEMORY_BYTES = "memory_bytes"
+    ELAPSED_US = "elapsed_us"
 
-    Parameters
-    ----------
-    df : pandas.DataFrame
-        Input data dataframe that needs to be remapped.
-        Remapping is done in-place.
-    """
 
-    # Determine which columns to remap. A non-target input column that is suffixed by a
-    # column in STANDARDIZE_COLUMNS is remapped to produce a common schema.
-    remapper: dict[str, str] = {}
-    for init_col in df.columns:
-        if init_col not in STANDARDIZE_COLUMNS and init_col not in BASE_TARGET_COLS:
-            for common_col in STANDARDIZE_COLUMNS:
-                if init_col.endswith(common_col):
-                    remapper[init_col] = common_col
-                    break
-    df.rename(columns=remapper, inplace=True)
+TARGET_COLUMNS = [n.value for n in Targets]
+
+
+"""
+A dictionary of derived features. The name is the name of the derived feature that follows the format
+[OU]_[feature]. OU is guaranteed to be an unique identifier. The value of the derived feature is the
+column in pg_qss_stats that should be remapped.
+"""
+DERIVED_FEATURES_MAP = {
+    "IndexOnlyScan_num_iterator_used": "counter0",
+    "IndexOnlyScan_num_heap_fetches": "counter1",
+    "IndexScan_num_iterator_used": "counter0",
+    "IndexScan_num_heap_fetches": "counter1",
+    "IndexScan_num_outer_loops": "counter2",
+    "ModifyTableInsert_num_br_ir_as_triggers_fired": "counter0",
+    "ModifyTableInsert_num_spec_insert": "counter1",
+    "ModifyTableInsert_num_tuple_toast": "counter2",
+    "ModifyTableInsert_num_fsm_checks": "counter3",
+    "ModifyTableInsert_num_extends": "counter4",
+    "ModifyTableIndexInsert_indexid": "payload",
+    "ModifyTableIndexInsert_num_fsm_checks": "counter0",
+    "ModifyTableIndexInsert_num_extends": "counter1",
+    "ModifyTableIndexInsert_num_splits": "counter2",
+    "ModifyTableIndexInsert_num_finish_splits": "counter3",
+    "ModifyTableUpdate_num_br_ir_as_triggers_epq_fired": "counter0",
+    "ModifyTableUpdate_num_index_updates_fired": "counter1",
+    "ModifyTableUpdate_num_tuple_toast": "counter2",
+    "ModifyTableUpdate_num_fsm_checks": "counter3",
+    "ModifyTableUpdate_num_extends": "counter4",
+    "ModifyTableUpdate_num_key_changes": "counter5",
+    "ModifyTableUpdate_num_acquire_tuplock": "counter6",
+    "ModifyTableUpdate_num_lock_wait_members": "counter7",
+    "ModifyTableUpdate_num_updates": "counter8",
+    "ModifyTableUpdate_num_aborts": "counter9",
+    "ModifyTableDelete_num_br_ir_as_triggers_fired": "counter0",
+    "ModifyTableDelete_num_recheck_quals": "counter1",
+    "ModifyTableDelete_num_tuple_returns": "counter2",
+    "ModifyTableDelete_num_acquire_tuplock": "counter3",
+    "ModifyTableDelete_num_lock_wait_members": "counter4",
+    "LockRows_num_marks": "counter0",
+    "LockRows_num_invoke_epq": "counter1",
+    "LockRows_num_update_find_latest": "counter2",
+    "LockRows_num_check_tuplock_state": "counter3",
+    "LockRows_num_acquire_tuplock": "counter4",
+    "LockRows_num_lock_wait_members": "counter5",
+    "LockRows_num_heap_lock_updated_tuple_rec_tuples": "counter6",
+    "LockRows_num_heap_lock_updated_tuple_rec_wait_members": "counter7",
+    "LockRows_num_non_lock_wait_block_policy": "counter8",
+    "LockRows_num_aborts": "counter9",
+    "Agg_num_input_rows": "counter0",
+    "NestLoop_num_outer_rows": "counter0",
+    "NestLoop_num_inner_rows_cumulative": "counter1",
+    "AfterQueryTrigger_tgoid": "payload",
+    "BitmapIndexScan_num_tids_found": "counter0",
+    "BitmapHeapScan_num_blocks_fetch": "counter0",
+    "BitmapHeapScan_num_empty_tuples": "counter1",
+    "BitmapHeapScan_num_tuples_fetch": "counter2",
+    "BitmapHeapScan_num_blocks_prefetch": "counter3",
+}

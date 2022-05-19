@@ -3,22 +3,14 @@ from __future__ import annotations
 import pickle
 
 import numpy as np
-from lightgbm import LGBMRegressor
+import scipy as sp
+from lightgbm import LGBMRegressor, early_stopping
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.linear_model import (
-    ElasticNet,
-    HuberRegressor,
-    Lasso,
-    LinearRegression,
-    MultiTaskElasticNet,
-    MultiTaskLasso,
-)
+from sklearn.linear_model import ElasticNet, HuberRegressor
 from sklearn.multioutput import MultiOutputRegressor
 from sklearn.neural_network import MLPRegressor
 from sklearn.preprocessing import RobustScaler, StandardScaler
-from sklearn.tree import DecisionTreeRegressor
-
-from behavior.modeling import METHODS, featurize
+from behavior.modeling import featurize
 
 
 def get_model(method, config):
@@ -41,16 +33,11 @@ def get_model(method, config):
     ValueError
         If the requested method is not supported.
     """
-    if method not in METHODS:
-        raise ValueError(f"Method: {method} is not supported.")
 
     regressor = None
 
     # Tree-based Models.
-    if method == "dt":
-        regressor = DecisionTreeRegressor(max_depth=config["dt"]["max_depth"])
-        regressor = MultiOutputRegressor(regressor)
-    elif method == "rf":
+    if method == "rf":
         regressor = RandomForestRegressor(
             n_estimators=config["rf"]["n_estimators"],
             criterion=config["rf"]["criterion"],
@@ -58,19 +45,37 @@ def get_model(method, config):
             random_state=config["random_state"],
             n_jobs=config["num_jobs"],
         )
-    elif method == "gbm":
+    elif "gbm" in method:
+        splits = method.split("_")
+        alpha = None
+        if len(splits) == 2:
+            objective = splits[-1]
+        elif len(splits) == 3:
+            objective = splits[-2]
+            assert objective == "quantile"
+            alpha = float(splits[-1]) / 100.0
+        elif len(splits) == 4:
+            objective = splits[-3]
+            assert objective == "quantile"
+            alpha = (float(splits[-2]) + float(splits[-1]) / 10.0) / 100.0
+
         regressor = LGBMRegressor(
             max_depth=config["gbm"]["max_depth"],
             num_leaves=config["gbm"]["num_leaves"],
             n_estimators=config["gbm"]["n_estimators"],
             min_child_samples=config["gbm"]["min_child_samples"],
-            objective=config["gbm"]["objective"],
+            objective=objective,
             random_state=config["random_state"],
+            alpha=alpha,
         )
         regressor = MultiOutputRegressor(regressor)
-    elif method == "mlp":
+    elif "mlp" in method:
+        layers = int(method.split("_")[-1])
+        neurons = int(method.split("_")[-2])
+        assert layers > 0
+        assert neurons > 0
         # Multi-layer Perceptron.
-        hls = tuple(dim for dim in config["mlp"]["hidden_layers"])
+        hls = tuple(neurons for i in range(layers))
         regressor = MLPRegressor(
             hidden_layer_sizes=hls,
             early_stopping=config["mlp"]["early_stopping"],
@@ -84,10 +89,6 @@ def get_model(method, config):
     elif method == "huber":
         regressor = HuberRegressor(max_iter=config["huber"]["max_iter"])
         regressor = MultiOutputRegressor(regressor)
-    elif method == "mt_lasso":
-        regressor = MultiTaskLasso(alpha=config["mt_lasso"]["alpha"], random_state=config["random_state"])
-    elif method == "lasso":
-        regressor = Lasso(alpha=config["lasso"]["alpha"], random_state=config["random_state"])
     elif method == "elastic":
         regressor = ElasticNet(
             alpha=config["elastic"]["alpha"],
@@ -95,15 +96,13 @@ def get_model(method, config):
             random_state=config["random_state"],
         )
         regressor = MultiOutputRegressor(regressor)
-    elif method == "mt_elastic":
-        regressor = MultiTaskElasticNet(l1_ratio=config["mt_elastic"]["l1_ratio"], random_state=config["random_state"])
 
     assert regressor is not None
     return regressor
 
 
 class BehaviorModel:
-    def __init__(self, method, ou_name, base_model_name, config, features):
+    def __init__(self, method, ou_name, config, features, targets):
         """Create a Behavior Model for predicting the resource consumption cost of a single PostgreSQL operating-unit.
 
         Parameters
@@ -112,15 +111,14 @@ class BehaviorModel:
             The method to use. Valid methods are defined in modeling/__init__.py.
         ou_name : str
             The name of this operating unit.
-        base_model_name : str
-            The base name for this model, currently just the experiment name.
         config : dict[str, Any]
             The dictionary of configuration parameters for this model.
         features : list[str]
             Metadata describing input features for this model.
+        targets : list[str]
+            Targets that the model is being used to predict.
         """
         self.method = method
-        self.base_model_name = base_model_name
         self.ou_name = ou_name
         self.model = get_model(method, config)
         self.features = features
@@ -129,6 +127,7 @@ class BehaviorModel:
         self.eps = 1e-4
         self.xscaler = RobustScaler() if config["robust"] else StandardScaler()
         self.yscaler = RobustScaler() if config["robust"] else StandardScaler()
+        self.targets = targets
 
     def train(self, x, y):
         """Train a model using the input features and targets.
@@ -149,6 +148,7 @@ class BehaviorModel:
             y = self.yscaler.fit_transform(y)
 
         self.model.fit(x, y)
+
 
     def predict(self, x):
         """Run inference using the provided input features.
@@ -174,7 +174,10 @@ class BehaviorModel:
 
         # Map the result back to the original space.
         if self.normalize:
+            if len(self.targets) == 1:
+                y = y.reshape(-1, 1)
             y = self.yscaler.inverse_transform(y)
+
         if self.log_transform:
             y = np.exp(y) - self.eps
             y = np.clip(y, 0, None)
@@ -199,14 +202,13 @@ class BehaviorModel:
         """
         return featurize.extract_input_features(X, self.features)
 
-    def save(self, output_dir):
+    def save(self, output_path):
         """Save the model to disk.
 
         Parameters
         ----------
-        output_dir : Path | str
+        output_path : Path | str
             The directory to save the model to.
         """
-        model_dir = output_dir / self.base_model_name / self.method / self.ou_name
-        with open(model_dir / f"{self.method}_{self.ou_name}.pkl", "wb") as f:
+        with open(output_path / f"{self.ou_name}.pkl", "wb") as f:
             pickle.dump(self, f)

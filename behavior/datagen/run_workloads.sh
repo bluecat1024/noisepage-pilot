@@ -76,6 +76,8 @@ arg_parse() {
                 PG_BINARIES_LOCATION="${i#*=}"
                 PG_CTL_LOCATION="${PG_BINARIES_LOCATION}/pg_ctl"
                 PSQL_LOCATION="${PG_BINARIES_LOCATION}/psql"
+                PGDUMP_LOCATION="${PG_BINARIES_LOCATION}/pg_dump"
+                PGRESTORE_LOCATION="${PG_BINARIES_LOCATION}/pg_restore"
                 shift # past argument with no value
                 ;;
             -*)
@@ -131,27 +133,30 @@ echo "Starting workload execution ${ts}"
 # Get the absolute file path to the pg_ctl executable
 pg_ctl=$(realpath "${PG_CTL_LOCATION}")
 psql=$(realpath "${PSQL_LOCATION}")
+pg_dump=$(realpath "${PGDUMP_LOCATION}")
+pg_restore=$(realpath "${PGRESTORE_LOCATION}")
 
 # Kill any running postgres and/or TScout instances.
 pkill -i postgres || true
 pkill -i tscout || true
 
-modes=("train" "eval")
-for mode in "${modes[@]}"; do
-    output_folder="${OUTPUT_DIRECTORY}/experiment-${ts}/${mode}"
-    workload_directory="${WORKLOADS_DIRECTORY}/${mode}"
-    for workload in "${workload_directory}"/*; do
-        echo "Executing ${workload} for ${mode}"
+shopt -s nullglob
 
-        # Create the output directory for this particular benchmark invocation.
-        benchmark_suffix=$(basename "${workload}")
-        benchmark_output="${output_folder}/${benchmark_suffix}"
-        mkdir -p "${benchmark_output}"
+output_folder="${OUTPUT_DIRECTORY}/experiment-${ts}/"
+workload_directory="${WORKLOADS_DIRECTORY}/"
+for workload in "${workload_directory}"/*; do
+    echo "Executing ${workload}"
 
-        # Parse the config.yaml file that describes the experiment.
-        # The description for the config.yaml and the keys populated are described
-        # in behavior/datagen/generate_workloads.py.
-        config_yaml=$(realpath "${workload}"/config.yaml)
+    # Create the output directory for this particular benchmark invocation.
+    benchmark_suffix=$(basename "${workload}")
+    benchmark_output="${output_folder}/${benchmark_suffix}"
+    mkdir -p "${benchmark_output}"
+
+    # Parse the config.yaml file that describes the experiment.
+    # The description for the config.yaml and the keys populated are described
+    # in behavior/datagen/generate_workloads.py.
+    config_yaml=$(realpath "${workload}"/config.yaml)
+    (
         eval "$(niet -f eval . "${config_yaml}")"
 
         # shellcheck disable=2154 # populated by niet
@@ -179,9 +184,34 @@ for mode in "${modes[@]}"; do
                 doit noisepage_init --config="${postgresql_path}"
                 doit benchbase_bootstrap_dbms
 
-                # Create the database and load the database
-                # shellcheck disable=2154 # populated by niet
-                doit benchbase_run --benchmark="${benchmark}" --config="${benchbase_config_path}" --args="--create=true --load=true --execute=false"
+                if [ "$restore_db" == 'True' ];
+                then
+                    ${pg_restore} -j 8 -d benchbase "${restore_db_path}"
+
+                    # These are needed to clean up any sad state from the restore.
+                    ${psql} --dbname=benchbase --command="VACUUM;"
+                    ${psql} --dbname=benchbase --command="CHECKPOINT;"
+                else
+                    # Create the database and load the database
+                    # shellcheck disable=2154 # populated by niet
+                    doit benchbase_run --benchmark="${benchmark}" --config="${benchbase_config_path}" --args="--create=true --load=false --execute=false"
+
+                    if [ -n "$post_create" ];
+                    then
+                        # Execute post create SQL prior to loading the data.
+                        post_create_path=$(realpath "${post_create}")
+                        ${psql} --dbname=benchbase -f "${post_create_path}"
+                    fi
+
+                    doit benchbase_run --benchmark="${benchmark}" --config="${benchbase_config_path}" --args="--create=false --load=true --execute=false"
+
+                    if [ "$dump_db" == 'True' ];
+                    then
+                        # Dump the database.
+                        dump_file="${benchmark_output}/dump.dir"
+                        ${pg_dump} -j 8 -F d -f "${dump_file}" benchbase
+                    fi
+                fi
 
                 # Remove existing logfiles, if any exist.
                 ${pg_ctl} stop -D "${PGDATA_LOCATION}" -m smart
@@ -191,50 +221,77 @@ for mode in "${modes[@]}"; do
 
                 # Then restart the instance.
                 ${pg_ctl} start -D "${PGDATA_LOCATION}"
-            else
+
+                # Install QSS extension
+                doit noisepage_qss_install --dbname=benchbase
+
+                # shellcheck disable=2154 # populated by niet
+                if [ "$pg_analyze" != 'False' ];
+                then
+                    # If pg_analyze is specified, then run ANALYZE on the benchmark's tables.
+                    doit behavior_pg_analyze_benchmark --benchmark="${benchmark}"
+                fi
+
+                # shellcheck disable=2154 # populated by niet
+                if [ "$pg_prewarm" != 'False' ];
+                then
+                    # If pg_prewarm is specified, then invoke pg_prewarm on the benchmark's tables.
+                    doit benchbase_prewarm_install
+                    doit behavior_pg_prewarm_benchmark --benchmark="${benchmark}"
+                fi
+            elif [ "${continuous}" != 'True' ];
+            then
+                # Under continuous execution, we don't swap the configuration.
+                # Swapping the configuration forces a restart at present.
                 doit noisepage_swap_config --config="${postgresql_path}"
 
-                # We don't need to bootstrap the benchbase database here because
-                # recovery should reload the entire benchbase database state.
-            fi
+                # shellcheck disable=2154 # populated by niet
+                if [ "$pg_analyze" != 'False' ];
+                then
+                    # If pg_analyze is specified, then run ANALYZE on the benchmark's tables.
+                    doit behavior_pg_analyze_benchmark --benchmark="${benchmark}"
+                fi
 
-            # shellcheck disable=2154 # populated by niet
-            if [ "$pg_prewarm" != 'False' ];
-            then
-                # If pg_prewarm is specified, then invoke pg_prewarm on the benchmark's tables.
-                doit benchbase_prewarm_install
-                doit behavior_pg_prewarm_benchmark --benchmark="${benchmark}"
-            fi
-
-            # shellcheck disable=2154 # populated by niet
-            if [ "$pg_analyze" != 'False' ];
-            then
-                # If pg_analyze is specified, then run ANALYZE on the benchmark's tables.
-                doit behavior_pg_analyze_benchmark --benchmark="${benchmark}"
+                # shellcheck disable=2154 # populated by niet
+                if [ "$pg_prewarm" != 'False' ];
+                then
+                    # If pg_prewarm is specified, then invoke pg_prewarm on the benchmark's tables.
+                    doit benchbase_prewarm_install
+                    doit behavior_pg_prewarm_benchmark --benchmark="${benchmark}"
+                fi
             fi
 
             # Initialize TScout. We currently don't have a means by which to check whether
             # TScout has successfully attached to the instance. As such, we (wait) 5 seconds.
             append=$( [[ $i != "0" ]] && echo "True" || echo "False" )
-            doit tscout_init --output_dir="${benchmark_output}" --wait_time=5 --append="${append}"
+            doit tscout_init --output_dir="${benchmark_output}" --wait_time=10 --collector_fast_interval=1 --collector_slow_interval=30 --append="${append}"
 
             # Execute the benchmark
             doit benchbase_run --benchmark="${benchmark}" --config="${benchbase_config_path}" --args="--execute=true"
 
-            # Shutdown TScout and take ownership of the results.
-            doit tscout_shutdown --output_dir="${benchmark_output}" --wait_time=10 --flush_time=5
+            # Shutdown TScout and take ownership of the results and move into an indexed output directory.
+            doit tscout_shutdown --output_dir="${benchmark_output}" --wait_time=60
 
-            # Since pg_stats can change in between benchmark invocations, pg_stats is written out
-            # to a file after each benchmark invocation within an experiment. The CSV file is
-            # suffixed by the benchmark index.
-            stats_file="${benchmark_output}/pg_stats.csv.${i}"
-            ${psql} --dbname=benchbase --csv --command="SELECT * FROM pg_stats;" > "${stats_file}"
+            if [ ${i} == $((${#benchbase_configs[@]} - 1)) ];
+            then
+                plans_file="${benchmark_output}/pg_qss_plans.csv"
+                stats_file="${benchmark_output}/pg_qss_stats.csv"
+                ${psql} --dbname=benchbase --csv --command="SELECT * FROM pg_catalog.pg_qss_plans;" > "${plans_file}"
+                ${psql} --dbname=benchbase --csv --command="SELECT * FROM pg_catalog.pg_qss_stats;" > "${stats_file}"
+            fi
 
             # Similarly, we move the postgres log file to the experiment output directory if it
             # exists. The log file is also suffixed by this benchmark index.
             log=${PGDATA_LOCATION}/log
-            ${pg_ctl} stop -D "${PGDATA_LOCATION}" -m smart
-            if [ -d "${log}" ];
+            if [ "${continuous}" != 'True' ];
+            then
+                ${pg_ctl} stop -D "${PGDATA_LOCATION}" -m smart
+            else
+                postexecute_path=$(realpath "${post_execute[$i]}")
+                ${psql} --dbname=benchbase -f "${postexecute_path}"
+            fi
+
+            if [ -d "${log}" ] && [ "${continuous}" != 'True' ];
             then
                 mv "${PGDATA_LOCATION}/log" "${benchmark_output}/log.${i}"
             fi
@@ -244,9 +301,15 @@ for mode in "${modes[@]}"; do
             mv "${BENCHBASE_LOCATION}/results" "${benchmark_output}/results.${i}"
         done
 
-        echo "Executed ${workload} for ${mode}"
-    done
+        if [ "${continuous}" == 'True' ];
+        then
+            ${pg_ctl} stop -D "${PGDATA_LOCATION}" -m smart
+            mv "${PGDATA_LOCATION}/log" "${benchmark_output}/log"
+        fi
+    )
+
+    echo "Executed ${workload}"
 done
 
 ts=$(date '+%Y-%m-%d_%H-%M-%S')
-echo "Finished workload execution ${ts}"
+echo "Finished workload execution at ${ts}"

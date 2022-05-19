@@ -20,6 +20,7 @@ pygments>=2.4.1
 pylint
 pyyaml
 scikit-learn>=1.0.0 # Behavior models.
+scipy
 setproctitle
 setuptools
 torch # Forecast. LSTM.

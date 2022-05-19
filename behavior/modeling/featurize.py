@@ -1,7 +1,7 @@
 import numpy as np
 import pandas
 
-from behavior import BASE_TARGET_COLS
+from behavior import TARGET_COLUMNS
 from behavior.modeling.featurewiz import featurewiz as FW
 
 # To prevent having any actual zeros in the training/testing data which can yield
@@ -10,10 +10,10 @@ from behavior.modeling.featurewiz import featurewiz as FW
 BIAS_EPSILON = 1e-6
 
 
-def derive_input_features(train, test=None, targets=None, config=None):
+def derive_input_features(train, feature_engg="interactions", ignore=[], test=None, targets=None, config=None):
     """
     Derives input features for a dataframe using featurewiz.
-    Dataframe assumes that all BASE_TARGET_COLS exist.
+    Dataframe assumes that all TARGET_COLUMNS exist.
 
     Parameters
     ----------
@@ -47,19 +47,15 @@ def derive_input_features(train, test=None, targets=None, config=None):
 
     # Drop all target columns that we are not trying to optimize for.
     # For instance, if targets=["elapsed_us"], then we drop all other Y's.
-    # This prevents featurewiz from trying to use other Y's as X's.
-    drop_targets = set(BASE_TARGET_COLS) - set(targets)
+    # This prevents featurewiz from trying to use other Y's as X's. We also
+    # drop any columns instructed by ignore.
+    drop_targets = (set(TARGET_COLUMNS) - set(targets)) | set(ignore)
     train_input = train.copy(deep=True)
     test_input = test.copy(deep=True) if test is not None else None
     if len(drop_targets) > 0:
-        train_input.drop(drop_targets, axis=1, inplace=True)
+        train_input.drop(drop_targets, axis=1, inplace=True, errors='ignore')
         if test_input is not None:
-            test_input.drop(drop_targets, axis=1, inplace=True)
-
-    # Add the EPSILON to remove zeros from the dataset.
-    train_input = train_input + BIAS_EPSILON
-    if test_input is not None:
-        test_input = test_input + BIAS_EPSILON
+            test_input.drop(drop_targets, axis=1, inplace=True, errors='ignore')
 
     # Invoke featurewiz to find the best features to use.
     features, _ = FW.featurewiz(
@@ -70,11 +66,15 @@ def derive_input_features(train, test=None, targets=None, config=None):
         test_data=test_input,
         # Target Encoding and Group By aren't useful since we don't actually
         # have any true "categorical" features.
-        feature_engg="interactions",
+        feature_engg=feature_engg,
         category_encoders="",
         dask_xgboost_flag=False,
         nrows=None,
     )
+
+    if test_input is None:
+        # If no test_input, then it returns directly columns.
+        return features
 
     if len(features.columns) - len(targets) == 0:
         # In this case, featurewiz thinks all the features are irrelevant.
@@ -84,10 +84,10 @@ def derive_input_features(train, test=None, targets=None, config=None):
     return list(features.columns)[0 : -len(targets)]
 
 
-def extract_all_features(df):
+def extract_all_features(df, ignore):
     """
     Derives input features for a dataframe as all non-target columns.
-    Dataframe assumes that all BASE_TARGET_COLS exist.
+    Dataframe assumes that all TARGET_COLUMNS exist.
 
     Parameters
     ----------
@@ -100,7 +100,10 @@ def extract_all_features(df):
         List of strings that describe how to transform the input data into input features
         expected by the model.
     """
-    input_columns = set(df.columns) - set(BASE_TARGET_COLS)
+    input_columns = set(df.columns) - set(TARGET_COLUMNS) - set(ignore)
+    if len(input_columns) == 0:
+        return ["bias"]
+
     return list(input_columns)
 
 
@@ -122,10 +125,6 @@ def extract_input_features(df, metadata):
     pandas.DataFrame
         Input dataframe transformed into the model's input features.
     """
-
-    # To prevent some transformations from yielding Inf, we strip all zeros
-    # from the input data by adding a small epsilon.
-    df[df == 0] = BIAS_EPSILON
     output_columns = []
     for column in metadata:
 
@@ -136,7 +135,7 @@ def extract_input_features(df, metadata):
         # [id] produces a list of input columns from df that are passed
         # as inputs to [func].
         ops = {
-            "_div_by_": lambda x, y: x * 1.0 / y,
+            "_div_by_": lambda x, y: x * 1.0 / (y + BIAS_EPSILON),
             "_mult_by_": lambda x, y: x * y,
             "_minus_": lambda x, y: x - y,
             "_plus_": lambda x, y: x + y,

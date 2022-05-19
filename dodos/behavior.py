@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 
 from doit.action import CmdAction
-from plumbum import local
+from plumbum import local, FG
 
 import dodos.benchbase
 import dodos.noisepage
@@ -26,8 +26,11 @@ POSTGRESQL_CONF = Path("config/postgres/default_postgresql.conf").absolute()
 # Output: model directory.
 ARTIFACT_WORKLOADS = ARTIFACTS_PATH / "workloads"
 ARTIFACT_DATA_RAW = ARTIFACTS_PATH / "data/raw"
+ARTIFACT_DATA_QSS = ARTIFACTS_PATH / "data/qss"
 ARTIFACT_DATA_DIFF = ARTIFACTS_PATH / "data/diff"
+ARTIFACT_DATA_MERGE = ARTIFACTS_PATH / "data/merge"
 ARTIFACT_MODELS = ARTIFACTS_PATH / "models"
+ARTIFACT_EVALS_OU = ARTIFACTS_PATH / "evals_ou"
 
 
 def task_behavior_generate_workloads():
@@ -67,190 +70,6 @@ def task_behavior_generate_workloads():
                 "default": True,
             },
         ],
-    }
-
-
-def task_behavior_execute_workloads():
-    """
-    Behavior modeling: execute workloads to generate training data.
-    """
-    execute_args = (
-        f"--workloads={ARTIFACT_WORKLOADS} "
-        f"--output-dir={ARTIFACT_DATA_RAW} "
-        f"--pgdata={ARTIFACT_pgdata} "
-        f"--benchbase={BENCHBASE_ARTIFACTS_PATH} "
-        f"--pg_binaries={NOISEPAGE_ARTIFACTS_PATH} "
-    )
-
-    return {
-        "actions": [
-            f"mkdir -p {ARTIFACT_DATA_RAW}",
-            f"behavior/datagen/run_workloads.sh {execute_args}",
-        ],
-        "file_dep": [
-            dodos.benchbase.ARTIFACT_benchbase,
-            dodos.noisepage.ARTIFACT_postgres,
-            dodos.noisepage.ARTIFACT_pg_ctl,
-        ],
-        "targets": [ARTIFACT_DATA_RAW],
-        "uptodate": [False],
-        "verbosity": VERBOSITY_DEFAULT,
-    }
-
-
-def task_behavior_perform_plan_diff():
-    """
-    Behavior modeling: perform plan differencing.
-    """
-
-    def datadiff_action(glob_pattern):
-        datadiff_args = f"--dir-datagen-data {ARTIFACT_DATA_RAW} " f"--dir-output {ARTIFACT_DATA_DIFF} "
-
-        if glob_pattern is not None:
-            datadiff_args = datadiff_args + f"--glob-pattern '{glob_pattern}'"
-
-        # Include the cython compiled modules in PYTHONPATH.
-        return f"PYTHONPATH=artifacts/:$PYTHONPATH python3 -m behavior datadiff {datadiff_args}"
-
-    return {
-        "actions": [
-            # The following command is necessary to force a rebuild everytime. Recompile diff_c.pyx.
-            "rm -f behavior/plans/diff_c.c",
-            f"python3 behavior/plans/setup.py build_ext --build-lib artifacts/ --build-temp {default_build_path()}",
-            f"mkdir -p {ARTIFACT_DATA_DIFF}",
-            CmdAction(datadiff_action, buffering=1),
-        ],
-        "file_dep": [
-            dodos.benchbase.ARTIFACT_benchbase,
-            dodos.noisepage.ARTIFACT_postgres,
-        ],
-        "targets": [ARTIFACT_DATA_DIFF],
-        "uptodate": [False],
-        "verbosity": VERBOSITY_DEFAULT,
-        "params": [
-            {
-                "name": "glob_pattern",
-                "long": "glob_pattern",
-                "help": "Glob pattern for selecting which experiments to perform differencing.",
-                "default": None,
-            },
-        ],
-    }
-
-
-def task_behavior_train():
-    """
-    Behavior modeling: train OU models.
-    """
-
-    def train_cmd(
-        train_experiment_names, train_benchmark_names, eval_experiment_names, eval_benchmark_names, use_featurewiz
-    ):
-        train_args = (
-            f"--config-file {MODELING_CONFIG_FILE} "
-            f"--dir-data {ARTIFACT_DATA_DIFF} "
-            f"--dir-output {ARTIFACT_MODELS} "
-        )
-
-        args = {
-            "--train-experiment-names": train_experiment_names,
-            "--train-benchmark-names": train_benchmark_names,
-            "--eval-experiment-names": eval_experiment_names,
-            "--eval-benchmark-names": eval_benchmark_names,
-        }
-
-        if use_featurewiz == "True":
-            train_args = train_args + "--use-featurewiz "
-
-        for k, v in args.items():
-            if v is not None:
-                train_args = train_args + f"{k}='{v}' "
-
-        return f"python3 -m behavior train {train_args}"
-
-    return {
-        "actions": [f"mkdir -p {ARTIFACT_MODELS}", CmdAction(train_cmd, buffering=1)],
-        "targets": [ARTIFACT_MODELS],
-        "verbosity": VERBOSITY_DEFAULT,
-        "uptodate": [False],
-        "params": [
-            {
-                "name": "train_experiment_names",
-                "long": "train_experiment_names",
-                "help": "Comma separated experiments/experiments glob patterns for training models.",
-                "default": None,
-            },
-            {
-                "name": "train_benchmark_names",
-                "long": "train_benchmark_names",
-                "help": "Comma separated benchmarks/benchmarks glob patterns for training models.",
-                "default": "*",
-            },
-            {
-                "name": "eval_experiment_names",
-                "long": "eval_experiment_names",
-                "help": "Comma separated experiments/experiments glob patterns for evaluating models on.",
-                "default": None,
-            },
-            {
-                "name": "eval_benchmark_names",
-                "long": "eval_benchmark_names",
-                "help": "Comma separated benchmarks/benchmarks glob patterns for evaluating models on.",
-                "default": "*",
-            },
-            {
-                "name": "use_featurewiz",
-                "long": "use_featurewiz",
-                "help": "Whether to use featurewiz for feature selection.",
-                "default": False,
-            },
-        ],
-    }
-
-
-def task_behavior_microservice():
-    """
-    Behavior modeling: models as a microservice (via Flask).
-    """
-
-    def run_microservice(models):
-        if models is None:
-            # Find the latest experiment by last modified timestamp.
-            experiment_list = sorted((exp_path for exp_path in ARTIFACT_MODELS.glob("*")), key=os.path.getmtime)
-            assert len(experiment_list) > 0, "No experiments found."
-            models = experiment_list[-1]
-        else:
-            assert os.path.isdir(models), f"Specified path {models} is not a valid directory."
-
-        server_cmd = local["python3"]["-m", "behavior", "microservice", "--models-path", models]
-        dest_stdout = "artifacts/behavior/microservice/microservice.out"
-        ret = server_cmd.run_nohup(stdout=dest_stdout)
-        print(f"Behavior models microservice: {dest_stdout} {ret.pid}")
-
-    return {
-        "actions": ["mkdir -p ./artifacts/behavior/microservice/", run_microservice],
-        "verbosity": VERBOSITY_DEFAULT,
-        "uptodate": [False],
-        "params": [
-            {
-                "name": "models",
-                "long": "models",
-                "help": "Path to folder containing models that should be used.",
-                "default": None,
-            },
-        ],
-    }
-
-
-def task_behavior_microservice_kill():
-    """
-    Behavior modeling: kill all running microservices.
-    """
-    return {
-        "actions": [
-            "pkill --full '^Behavior Models Microservice' || true",
-        ],
-        "verbosity": VERBOSITY_DEFAULT,
     }
 
 
@@ -326,5 +145,255 @@ def task_behavior_pg_prewarm_benchmark():
                 "help": "Benchmark whose tables should be analyzed.",
                 "default": None,
             },
+        ],
+    }
+
+
+def task_behavior_execute_workloads():
+    """
+    Behavior modeling: execute workloads to generate training data.
+    """
+    execute_args = (
+        f"--workloads={ARTIFACT_WORKLOADS} "
+        f"--output-dir={ARTIFACT_DATA_RAW} "
+        f"--pgdata={ARTIFACT_pgdata} "
+        f"--benchbase={BENCHBASE_ARTIFACTS_PATH} "
+        f"--pg_binaries={NOISEPAGE_ARTIFACTS_PATH} "
+    )
+
+    return {
+        "actions": [
+            f"mkdir -p {ARTIFACT_DATA_RAW}",
+            f"behavior/datagen/run_workloads.sh {execute_args}",
+        ],
+        "file_dep": [
+            dodos.benchbase.ARTIFACT_benchbase,
+            dodos.noisepage.ARTIFACT_postgres,
+            dodos.noisepage.ARTIFACT_pg_ctl,
+        ],
+        "targets": [ARTIFACT_DATA_RAW],
+        "uptodate": [False],
+        "verbosity": VERBOSITY_DEFAULT,
+    }
+
+
+def task_behavior_perform_plan_extract_qss():
+    """
+    Behavior modeling: extract features from query state store and standardize columns.
+    """
+
+    def extract_qss(glob_pattern, output_ous):
+        args = f"--dir-datagen-data {ARTIFACT_DATA_RAW} " f"--dir-output {ARTIFACT_DATA_QSS} "
+        if glob_pattern is not None:
+            args = args + f"--glob-pattern '{glob_pattern}'"
+
+        if output_ous is not None:
+            args = args + f"--output-ous '{output_ous}'"
+
+        return f"python3 -m behavior extract_qss {args}"
+
+    return {
+        "actions": [
+            f"mkdir -p {ARTIFACT_DATA_QSS}",
+            CmdAction(extract_qss, buffering=1),
+        ],
+        "targets": [ARTIFACT_DATA_QSS],
+        "uptodate": [False],
+        "verbosity": VERBOSITY_DEFAULT,
+        "params": [
+            {
+                "name": "glob_pattern",
+                "long": "glob_pattern",
+                "help": "Glob pattern for selecting which experiments to perform differencing.",
+                "default": None,
+            },
+            {
+                "name": "output_ous",
+                "long": "output_ous",
+                "help": "Comma separated list of OUs to output.",
+                "default": None,
+            }
+        ],
+    }
+
+
+def task_behavior_perform_plan_diff():
+    """
+    Behavior modeling: perform plan differencing.
+    """
+
+    def datadiff_action(glob_pattern, output_ous):
+        datadiff_args = f"--dir-datagen-data {ARTIFACT_DATA_QSS} " f"--dir-output {ARTIFACT_DATA_DIFF} "
+        if glob_pattern is not None:
+            datadiff_args = datadiff_args + f"--glob-pattern '{glob_pattern}'"
+
+        if output_ous is not None:
+            datadiff_args = datadiff_args + f"--output-ous '{output_ous}'"
+
+        # Include the cython compiled modules in PYTHONPATH.
+        return f"PYTHONPATH=artifacts/:$PYTHONPATH python3 -m behavior diff {datadiff_args}"
+
+    return {
+        "actions": [
+            # The following command is necessary to force a rebuild everytime. Recompile diff_c.pyx.
+            "rm -f behavior/plans/diff_c.c",
+            f"python3 behavior/plans/setup.py build_ext --build-lib artifacts/ --build-temp {default_build_path()}",
+            f"mkdir -p {ARTIFACT_DATA_DIFF}",
+            CmdAction(datadiff_action, buffering=1),
+        ],
+        "file_dep": [
+            dodos.benchbase.ARTIFACT_benchbase,
+            dodos.noisepage.ARTIFACT_postgres,
+        ],
+        "targets": [ARTIFACT_DATA_DIFF],
+        "uptodate": [False],
+        "verbosity": VERBOSITY_DEFAULT,
+        "params": [
+            {
+                "name": "glob_pattern",
+                "long": "glob_pattern",
+                "help": "Glob pattern for selecting which experiments to perform differencing.",
+                "default": None,
+            },
+            {
+                "name": "output_ous",
+                "long": "output_ous",
+                "help": "Comma separated list of OUs to output.",
+                "default": None,
+            }
+        ],
+    }
+
+
+def task_behavior_perform_plan_state_merge():
+    """
+    Behavior modeling: perform merging of raw data with snapshots.
+    """
+    def merge_action():
+        args = f"--dir-datagen-diff {ARTIFACT_DATA_DIFF} " f"--dir-output {ARTIFACT_DATA_MERGE}"
+        return f"python3 -m behavior state_merge {args}"
+
+    return {
+        "actions": [
+            f"mkdir -p {ARTIFACT_DATA_MERGE}",
+            CmdAction(merge_action, buffering=1)
+        ],
+        "file_dep": [
+            dodos.noisepage.ARTIFACT_postgres,
+        ],
+        "targets": [
+            ARTIFACT_DATA_MERGE
+        ],
+        "uptodate": [False],
+        "verbosity": VERBOSITY_DEFAULT,
+    }
+
+
+def task_behavior_train():
+    """
+    Behavior modeling: train OU models.
+    """
+
+    def train_cmd(use_featurewiz, train_data, prefix_allow_derived_features):
+        train_args = (
+            f"--config-file {MODELING_CONFIG_FILE} "
+            f"--dir-data {train_data} "
+            f"--dir-output {ARTIFACT_MODELS} "
+        )
+
+        if prefix_allow_derived_features != "":
+            train_args = train_args + f"--prefix-allow-derived-features {prefix_allow_derived_features} "
+
+        if use_featurewiz == "True":
+            train_args = train_args + "--use-featurewiz "
+
+        return f"python3 -m behavior train {train_args}"
+
+    return {
+        "actions": [f"mkdir -p {ARTIFACT_MODELS}", CmdAction(train_cmd, buffering=1)],
+        "targets": [ARTIFACT_MODELS],
+        "verbosity": VERBOSITY_DEFAULT,
+        "uptodate": [False],
+        "params": [
+            {
+                "name": "use_featurewiz",
+                "long": "use_featurewiz",
+                "help": "Whether to use featurewiz for feature selection.",
+                "default": False,
+            },
+            {
+                "name": "train_data",
+                "long": "train_data",
+                "help": "Root of a recursive glob to gather all feather files for training data.",
+                "default": ARTIFACT_DATA_MERGE,
+            },
+            {
+                "name": "prefix_allow_derived_features",
+                "long": "prefix_allow_derived_features",
+                "help": "List of prefixes to use for selecting derived features for training the model.",
+                "default": "",
+            }
+        ],
+    }
+
+
+def task_behavior_eval_ou():
+    """
+    Behavior modeling: eval OU models.
+    """
+    def eval_cmd(eval_data, skip_generate_plots, models, methods):
+        if models is None:
+            # Find the latest experiment by last modified timestamp.
+            experiment_list = sorted((exp_path for exp_path in ARTIFACT_MODELS.glob("*")), key=os.path.getmtime)
+            assert len(experiment_list) > 0, "No experiments found."
+            models = experiment_list[-1]
+        else:
+            assert os.path.isdir(models), f"Specified path {models} is not a valid directory."
+
+        eval_args = (
+            f"--dir-data {eval_data} "
+            f"--dir-models {models} "
+            f"--dir-evals-output {ARTIFACT_EVALS_OU} "
+        )
+
+        if methods is not None:
+            eval_args = eval_args + f"--methods {methods}"
+
+        if not skip_generate_plots:
+            eval_args = eval_args + "--generate-plots"
+
+        return f"python3 -m behavior eval_ou {eval_args}"
+
+    return {
+        "actions": [f"mkdir -p {ARTIFACT_EVALS_OU}", CmdAction(eval_cmd, buffering=1)],
+        "targets": [ARTIFACT_EVALS_OU],
+        "verbosity": VERBOSITY_DEFAULT,
+        "uptodate": [False],
+        "params": [
+            {
+                "name": "eval_data",
+                "long": "eval_data",
+                "help": "Path to root folder containing feathers for evaluation purposes. (structure: [experiment]/[benchmark]/*.feather)",
+                "default": ARTIFACT_DATA_MERGE,
+            },
+            {
+                "name": "skip_generate_plots",
+                "long": "skip_generate_plots",
+                "help": "Flag of whether to skip generate plots or not.",
+                "type": bool,
+                "default": False
+            },
+            {
+                "name": "models",
+                "long": "models",
+                "help": "Path to folder containing models that should be used. Defaults to last trained models.",
+                "default": None,
+            },
+            {
+                "name": "methods",
+                "long": "methods",
+                "help": "Comma separated methods that should be evaluated. Defaults to None (all).",
+                "default": None,
+            }
         ],
     }

@@ -14,7 +14,7 @@ def task_tscout_init():
     TScout: attach TScout to a running NoisePage instance
     """
 
-    def start_tscout(output_dir, wait_time, append):
+    def start_tscout(output_dir, wait_time, append, collector_fast_interval, collector_slow_interval):
         if output_dir is None:
             print("Unable to start tscout without an output directory")
             return False
@@ -31,6 +31,12 @@ def task_tscout_init():
         arguments = ["tscout.py", postmaster_pid, "--outdir", dir_tscout_output]
         if append == "True":
             arguments.append("--append")
+
+        arguments.append("--collector_fast_interval")
+        arguments.append(collector_fast_interval)
+
+        arguments.append("--collector_slow_interval")
+        arguments.append(collector_slow_interval)
 
         cmd.sudo["python3"][arguments].run_bg(
             # sys.stdout will actually give the doit writer. Here we need the actual
@@ -57,9 +63,21 @@ def task_tscout_init():
                 "name": "wait_time",
                 "long": "wait_time",
                 "help": "Time to wait (seconds) after TScout has been started.",
-                "default": 5,
+                "default": 10,
             },
             {"name": "append", "long": "append", "help": "Whether to pass --append to TScout.", "default": False},
+            {
+                "name": "collector_fast_interval",
+                "long": "collector_fast_interval",
+                "help": "Interval (seconds) to collect (frequent) information from database.",
+                "default": 1,
+            },
+            {
+                "name": "collector_slow_interval",
+                "long": "collector_slow_interval",
+                "help": "Interval (seconds) to collect (infrequent) information from database.",
+                "default": 60,
+            },
         ],
     }
 
@@ -69,14 +87,16 @@ def task_tscout_shutdown():
     TScout: shutdown the running TScout instance
     """
 
-    def shutdown_tscout(output_dir, wait_time, flush_time):
+    def shutdown_tscout(output_dir, wait_time):
         if output_dir is None:
             print("Unable to start tscout without an output directory")
             return False
 
         time.sleep(int(wait_time))
         cmd.sudo["pkill", "-SIGINT", "-i", "tscout"](retcode=None)
-        time.sleep(int(flush_time))
+        while len(list(local.pgrep("tscout.py"))) != 0:
+            print("Waiting for tscout to shutdown from SIGINT.")
+            time.sleep(5)
 
         # Because TScout has to execute with sudo, the results are owned by root.
         # Take ownership of TScout's results.
@@ -106,13 +126,7 @@ def task_tscout_shutdown():
                 "name": "wait_time",
                 "long": "wait_time",
                 "help": "Time to wait (seconds) before shutting down TScout.",
-                "default": 10,
-            },
-            {
-                "name": "flush_time",
-                "long": "flush_time",
-                "help": "Time to wait (seconds) before taking ownership of the TScout data.",
-                "default": 5,
+                "default": 60,
             },
         ],
     }

@@ -8,7 +8,6 @@ from dodos.ci import *
 from dodos.forecast import *
 from dodos.noisepage import *
 from dodos.pilot import *
-from dodos.project1 import *
 from dodos.tscout import *
 
 DOIT_CONFIG = {

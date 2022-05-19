@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import xml.etree.ElementTree as ET
 import logging
 import shutil
 from pathlib import Path
@@ -8,62 +9,95 @@ import yaml
 from plumbum import cli
 
 from behavior import BENCHDB_TO_TABLES
-from evaluation.utils import inject_param_xml, param_sweep_space, parameter_sweep
 
 logger = logging.getLogger(__name__)
 
 
-def datagen_sweep_callback(parameters, closure):
-    """
-    Callback to datagen parameter sweep.
-
-    Given the current set of parameters as part of the sweep, this callback generates
-    the correct output workload format. Workload formats are described in more detail
-    in behavior/datagen/run_workloads.sh
+def inject_param_xml(file_path, parameters):
+    '''Inject and re-write XML file with given parameters.
 
     Parameters:
     -----------
-    parameters: List[Tuple[List[str], Any]]
-        The parameter combination.
-    closure : Dict[str, Any]
-        Closure environment passed from caller.
-    """
-    mode_dir = closure["mode_dir"]
-    benchmark = closure["benchmark"]
-    benchbase_config_path = closure["benchbase_config_path"]
-    postgresql_config_file = closure["postgresql_config_file"]
-    pg_analyze = closure["pg_analyze"]
-    pg_prewarm = closure["pg_prewarm"]
+    file_path : str
+        XML file path to inject.
+    parameters : List[Tuple(List[str], Any)]
+        The list of parameter names and values to inject.
+    '''
+    conf_etree = ET.parse(file_path)
+    root = conf_etree.getroot()
+    parameters = [(key.split("."), parameters[key]) for key in parameters]
 
-    # The suffix is a concatenation of parameter names and their values.
-    param_suffix = "_".join([name_level[-1] + "_" + str(value) for name_level, value in parameters])
-    results_dir = Path(mode_dir / (benchmark + "_" + param_suffix))
-    results_dir.mkdir(exist_ok=True)
-    print(f"Creating workload configuration: {results_dir}")
+    for name_level, val in parameters:
+        cursor = root
+        # Traverse XML name levels.
+        for key in name_level:
+            cursor = cursor.find(key)
+            if cursor is None:
+                break
 
-    # Copy and inject the XML file of BenchBase.
-    benchbase_config_file = Path(results_dir / "benchbase_config.xml")
-    shutil.copy(benchbase_config_path, benchbase_config_file)
-    inject_param_xml(benchbase_config_file.as_posix(), parameters)
-    benchbase_configs = [str(benchbase_config_file.resolve())]
+        if cursor is not None:
+            cursor.text = str(val)
 
-    # Copy the default postgresql.conf file.
-    # TODO(wz2): Rewrite the postgresql.conf based on knob tweaks and modify the param_suffix above.
-    benchbase_postgresql_config_file = Path(results_dir / "postgresql.conf")
-    shutil.copy(postgresql_config_file, benchbase_postgresql_config_file)
-    pg_configs = [str(benchbase_postgresql_config_file.resolve())]
+    conf_etree.write(file_path)
+
+
+def generate_workload(config, mode_dir, benchbase_path, postgresql_config_file):
+    output_name = config["output_name"]
+    assert output_name is not None
+    benchmark_dir = Path(mode_dir / output_name)
+    benchmark_dir.mkdir(exist_ok=True)
+    print(f"Creating workload configuration: {benchmark_dir}")
+
+    benchbase_configs = []
+    pg_configs = []
+    post_execute = []
+    for idx, run in enumerate(config["runs"]):
+        # Copy and inject the XML file of BenchBase.
+        benchbase_config_file = Path(benchmark_dir / f"benchbase_config_{idx}.xml")
+        shutil.copy(benchbase_path, benchbase_config_file)
+        run["scalefactor"] = config["scalefactor"]
+        inject_param_xml(benchbase_config_file.as_posix(), run)
+        benchbase_configs.append(str(benchbase_config_file.resolve()))
+
+        # Copy the default postgresql.conf file.
+        benchbase_postgresql_config_file = Path(benchmark_dir / f"postgresql_{idx}.conf")
+        shutil.copy(postgresql_config_file, benchbase_postgresql_config_file)
+        if "options" in run and run["options"] is not None and len(run["options"]) > 0:
+            with open(benchbase_postgresql_config_file, "a") as f:
+                for option in run["options"]:
+                    f.write(f"{option}\n")
+        pg_configs.append(str(benchbase_postgresql_config_file.resolve()))
+        if "post_execute_sql" in run and run["post_execute_sql"] is not None:
+            post_execute.append(run["post_execute_sql"])
+        else:
+            post_execute.append(None)
 
     # Create the config.yaml file
-    config = {
-        "benchmark": benchmark,
-        "pg_analyze": pg_analyze,
-        "pg_prewarm": pg_prewarm,
+    output = {
+        "benchmark": config["benchmark"],
+        "pg_analyze": config["pg_analyze"],
+        "pg_prewarm": config["pg_prewarm"],
+        "continuous": config["continuous"],
         "pg_configs": pg_configs,
         "benchbase_configs": benchbase_configs,
+        "dump_db": config["dump_db"],
     }
 
-    with (results_dir / "config.yaml").open("w") as f:
-        yaml.dump(config, f)
+    output_post_execute = False
+    for val in post_execute:
+        output_post_execute |= val is not None
+    if output_post_execute:
+        output["post_execute"] = post_execute
+
+    if config["restore_db_path"] is not None:
+        output["restore_db"] = True
+        output["restore_db_path"] = config["restore_db_path"]
+
+    if config["post_create_sql"] is not None:
+        output["post_create"] = config["post_create_sql"]
+
+    with (benchmark_dir / "config.yaml").open("w") as f:
+        yaml.dump(output, f)
 
 
 class GenerateWorkloadsCLI(cli.Application):
@@ -98,34 +132,19 @@ class GenerateWorkloadsCLI(cli.Application):
             self.config = yaml.load(f, Loader=yaml.FullLoader)["datagen"]
         logger.setLevel(self.config["log_level"])
 
-        # Validate the chosen benchmarks from the config.
-        benchmarks = self.config["benchmarks"]
-        for benchmark in benchmarks:
+        self.dir_output.mkdir(parents=True, exist_ok=True)
+
+        default_config = self.config["default_config"]
+        configs = self.config[f"configs"]
+        for augment in configs:
+            config = default_config.copy()
+            config.update(augment)
+
+            benchmark = config["benchmark"]
             if benchmark not in BENCHDB_TO_TABLES:
                 raise ValueError(f"Invalid benchmark: {benchmark}")
-
-        self.dir_output.mkdir(parents=True, exist_ok=True)
-        modes = ["train", "eval"]
-        for mode in modes:
-            mode_dir = Path(self.dir_output) / mode
-            Path(mode_dir).mkdir(parents=True, exist_ok=True)
-
-            # Build sweeping space
-            ps_space = param_sweep_space(self.config["param_sweep"])
-            # For each benchmark, ...
-            for benchmark in benchmarks:
-                benchbase_config_path = self.dir_benchbase_config / f"{benchmark}_config.xml"
-
-                # Generate OU training data for every parameter combination.
-                closure = {
-                    "mode_dir": mode_dir,
-                    "benchmark": benchmark,
-                    "benchbase_config_path": benchbase_config_path,
-                    "postgresql_config_file": self.postgresql_config_file,
-                    "pg_prewarm": self.config["pg_prewarm"],
-                    "pg_analyze": self.config["pg_analyze"],
-                }
-                parameter_sweep(ps_space, datagen_sweep_callback, closure)
+            benchbase_path = self.dir_benchbase_config / f"{benchmark}_config.xml"
+            generate_workload(config, self.dir_output, benchbase_path, self.postgresql_config_file)
 
 
 if __name__ == "__main__":

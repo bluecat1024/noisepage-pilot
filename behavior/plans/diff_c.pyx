@@ -7,13 +7,13 @@ cimport numpy as np
 # These offsets describe the location of a DIFFERENCING_SCHEMA column in the 2D numpy matrix.
 
 from behavior.plans import (
-    LEFT_CHILD_PLAN_NODE_ID_SCHEMA_INDEX,
-    PLAN_NODE_ID_SCHEMA_INDEX,
-    RIGHT_CHILD_PLAN_NODE_ID_SCHEMA_INDEX,
-    TARGET_START_SCHEMA_INDEX,
-    PlanDiffIncompleteSubinvocationException,
-    PlanDiffInvalidDataException,
-    PlanDiffUnsupportedParallelException,
+    DIFF_PLAN_NODE_ID_SCHEMA_INDEX,
+    DIFF_LEFT_CHILD_PLAN_NODE_ID_SCHEMA_INDEX,
+    DIFF_RIGHT_CHILD_PLAN_NODE_ID_SCHEMA_INDEX,
+    DIFF_TARGET_START_SCHEMA_INDEX,
+    DiffPlanIncompleteSubinvocationException,
+    DiffPlanInvalidDataException,
+    DiffPlanUnsupportedParallelException,
 )
 
 np.import_array()
@@ -28,9 +28,9 @@ ctypedef np.int64_t ITYPE_t
 #
 # This function does not return any values as it mutates the input 2D matrix in-place.
 # This function will raise the following exceptions:
-# - PlanDiffIncompleteSubinvocationException when a subinvocation is not complete.
-# - PlanDiffInvalidDataException when data is deemed to be invalid.
-# - PlanDiffUnsupportedParallelException when a subinvocation contains a parallel OU invocation.
+# - DiffPlanIncompleteSubinvocationException when a subinvocation is not complete.
+# - DiffPlanInvalidDataException when data is deemed to be invalid.
+# - DiffPlanUnsupportedParallelException when a subinvocation contains a parallel OU invocation.
 #
 # Skip checking bounds and wraparound for performance.
 @cython.boundscheck(False)
@@ -40,10 +40,10 @@ def diff_query_tree(np.ndarray[FTYPE_t, ndim=2] matrix):
     # Subtract 1 since the last column is subinvocation_id and we don't "difference" that.
     cdef int col = np.PyArray_DIMS(matrix)[1] - 1
 
-    cdef int plan_id = PLAN_NODE_ID_SCHEMA_INDEX
-    cdef int left_id = LEFT_CHILD_PLAN_NODE_ID_SCHEMA_INDEX
-    cdef int right_id = RIGHT_CHILD_PLAN_NODE_ID_SCHEMA_INDEX
-    cdef int target = TARGET_START_SCHEMA_INDEX
+    cdef int plan_id = DIFF_PLAN_NODE_ID_SCHEMA_INDEX
+    cdef int left_id = DIFF_LEFT_CHILD_PLAN_NODE_ID_SCHEMA_INDEX
+    cdef int right_id = DIFF_RIGHT_CHILD_PLAN_NODE_ID_SCHEMA_INDEX
+    cdef int target = DIFF_TARGET_START_SCHEMA_INDEX
 
     # Define a 1 dimensional array that has the same length as the number of rows.
     # offset is used to build a mapping offset[i] = Y such that plan node ID [i]
@@ -56,19 +56,19 @@ def diff_query_tree(np.ndarray[FTYPE_t, ndim=2] matrix):
         right = <int>matrix[i][right_id]
         if head == -1:
             # The plan_id should never be -1.
-            raise PlanDiffInvalidDataException()
+            raise DiffPlanInvalidDataException()
 
         # If any of the plan node IDs extracted above exceeds the number of rows, then
         # that means this invocation has insufficient data.
         if head >= rows or (left != -1 and left >= rows) or (right != -1 and right >= rows):
-            raise PlanDiffIncompleteSubinvocationException()
+            raise DiffPlanIncompleteSubinvocationException()
 
         # If offset[head] has already been populated then that means that this invocation
         # somehow has 2 datapoints with the same plan ID.
         #
         # TODO(wz2): Once we need to difference parallel query execution, revisit this.
         if offset[head] != -1:
-            raise PlanDiffUnsupportedParallelException()
+            raise DiffPlanUnsupportedParallelException()
         offset[head] = i
 
     # access is a BFS order of the query plan tree.
