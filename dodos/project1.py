@@ -37,7 +37,7 @@ def task_project1_enable_logging():
     return {
         "actions": [
             *[
-                f'PGPASSWORD={DEFAULT_PASS} psql --host=localhost --dbname={DEFAULT_DB} --username={DEFAULT_USER} --command="{sql}"'
+                f'PGPASSWORD=pass_gcn psql --host=localhost --dbname=benchbase_gcn --username=su_gcn --command="{sql}"'
                 for sql in sql_list
             ],
             lambda: cmd.sudo["systemctl"]["restart", "postgresql"].run_fg(),
