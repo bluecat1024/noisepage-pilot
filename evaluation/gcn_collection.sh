@@ -36,7 +36,7 @@ _setup_benchmark() {
 _change_exec_conf() {
     benchmark="${1}"
     nterminal="${2}"
-    xmlstarlet edit --inplace --update '/parameters/terminals' --value nterminal ./artifacts/project/${benchmark}_config.xml
+    xmlstarlet edit --inplace --update '/parameters/terminals' --value ${nterminal} ./artifacts/project/${benchmark}_config.xml
 }
 
 _dump_database() {
@@ -122,8 +122,8 @@ doit enable_pg_autoexplain
 doit benchbase_run --benchmark="${benchmark}" --config="./artifacts/project/${benchmark}_config.xml" --args="--execute=true"
 doit project1_disable_logging
 
-workload_csv_folder="./artifacts/project/${benchmark}_${nterminal}"
-mkdir -p workload_csv_folder
+workload_csv_folder="./artifacts/project/${benchmark}_${scalefactor}_${nterminal}"
+mkdir -p ${workload_csv_folder}
 workload_csv="${workload_csv_folder}/workload.csv"
 _copy_logs "${workload_csv}"
 _clear_log_folder
