@@ -8,6 +8,7 @@ from behavior.plans import diff
 from behavior.plans import state_merge
 from behavior.modeling import train
 from behavior.modeling import eval_ou
+from behavior.modeling import eval_query
 
 logger = logging.getLogger(__name__)
 
@@ -25,4 +26,5 @@ if __name__ == "__main__":
     BehaviorCLI.subcommand("state_merge", state_merge.StateMergeCLI)
     BehaviorCLI.subcommand("train", train.TrainCLI)
     BehaviorCLI.subcommand("eval_ou", eval_ou.EvalOUCLI)
+    BehaviorCLI.subcommand("eval_query", eval_query.EvalQueryCLI)
     BehaviorCLI.run()

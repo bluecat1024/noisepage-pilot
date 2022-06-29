@@ -17,7 +17,8 @@ from sklearn import tree
 
 from behavior import TARGET_COLUMNS, OperatingUnit, Targets, DERIVED_FEATURES_MAP
 from behavior.modeling import featurize, BLOCKED_OUS
-from behavior.modeling.utils import load_input_data, evaluate_ou_model
+from behavior.modeling.utils.prepare_data import load_input_data
+from behavior.modeling.utils.evaluate_ou import evaluate_ou_model
 from behavior.modeling.model import BehaviorModel
 
 logger = logging.getLogger(__name__)

@@ -31,6 +31,7 @@ ARTIFACT_DATA_DIFF = ARTIFACTS_PATH / "data/diff"
 ARTIFACT_DATA_MERGE = ARTIFACTS_PATH / "data/merge"
 ARTIFACT_MODELS = ARTIFACTS_PATH / "models"
 ARTIFACT_EVALS_OU = ARTIFACTS_PATH / "evals_ou"
+ARTIFACT_EVALS_QUERY = ARTIFACTS_PATH / "evals_query"
 
 
 def task_behavior_generate_workloads():
@@ -395,5 +396,83 @@ def task_behavior_eval_ou():
                 "help": "Comma separated methods that should be evaluated. Defaults to None (all).",
                 "default": None,
             }
+        ],
+    }
+
+
+def task_behavior_eval_query():
+    """
+    Behavior modeling: perform query-level model analysis.
+    """
+    def eval_cmd(session_sql, eval_raw_data, skip_generate_plots, base_models, psycopg2_conn, num_iterations):
+        if base_models is None:
+            # Find the latest experiment by last modified timestamp.
+            experiment_list = sorted((exp_path for exp_path in ARTIFACT_MODELS.glob("*")), key=os.path.getmtime)
+            assert len(experiment_list) > 0, "No experiments found."
+            base_models = experiment_list[-1] / "gbm_l2"
+
+        assert eval_raw_data is not None, "No path to experiment data specified."
+        assert os.path.isdir(base_models), f"Specified path {base_models} is not a valid directory."
+        assert psycopg2_conn is not None, "No Psycopg2 connection string is specified."
+
+        eval_args = (
+            f"--dir-data {eval_raw_data} "
+            f"--dir-base-models {base_models} "
+            f"--dir-evals-output {ARTIFACT_EVALS_QUERY} "
+            f"--psycopg2-conn \"{psycopg2_conn}\" "
+            f"--num-iterations {num_iterations} "
+        )
+
+        if session_sql is not None:
+            eval_args = eval_args + f"--session-sql {session_sql} "
+
+        if not skip_generate_plots:
+            eval_args = eval_args + "--generate-plots"
+
+        return f"python3 -m behavior eval_query {eval_args}"
+
+    return {
+        "actions": [f"mkdir -p {ARTIFACT_EVALS_QUERY}", CmdAction(eval_cmd, buffering=1)],
+        "targets": [ARTIFACT_EVALS_QUERY],
+        "verbosity": VERBOSITY_DEFAULT,
+        "uptodate": [False],
+        "params": [
+            {
+                "name": "session_sql",
+                "long": "session_sql",
+                "help": "Path to a list of SQL statements that should be executed in the session prior to EXPLAIN.",
+                "default": None,
+            },
+            {
+                "name": "eval_raw_data",
+                "long": "eval_raw_data",
+                "help": "Path to root folder containing the RAW data for evaluation purposes.",
+                "default": None,
+            },
+            {
+                "name": "skip_generate_plots",
+                "long": "skip_generate_plots",
+                "help": "Flag of whether to skip generate plots or not.",
+                "type": bool,
+                "default": False
+            },
+            {
+                "name": "base_models",
+                "long": "base_models",
+                "help": "Path to folder containing models for the base case. Defaults to gbm_l2 of last trained models.",
+                "default": None,
+            },
+            {
+                "name": "psycopg2_conn",
+                "long": "psycopg2_conn",
+                "help": "psycopg2 connection string to connect to the valid database instance.",
+                "default": None,
+            },
+            {
+                "name": "num_iterations",
+                "long": "num_iterations",
+                "help": "Number of iterations to attempt to converge predictions.",
+                "default": 1,
+            },
         ],
     }
