@@ -107,6 +107,7 @@ def augment_ous(scratch_it, sliced_metadata, conn):
             if target_file.startswith("AUG"):
                 continue
 
+            logger.info("[AUGMENT] Input %s", target_file)
             data = pd.read_feather(target_file)
             data.set_index(keys=["unix_timestamp"], drop=True, append=False, inplace=True)
             data.sort_index(axis=0, inplace=True)
@@ -136,6 +137,7 @@ def augment_ous(scratch_it, sliced_metadata, conn):
     for augment in mt_augment:
         files = sorted(glob.glob(f"{scratch_it}/{augment.name}.feather.*"))
         for target_file in files:
+            logger.info("[AUGMENT] Input %s", target_file)
             data = pd.read_feather(target_file)
             data = merge_modifytable_data(data=data, processed_time_tables=process_tables)
             data.to_feather(scratch_it / f"AUG_{augment.name}.feather{Path(target_file).suffix}")
@@ -263,15 +265,19 @@ def main(num_iterations, psycopg2_conn, session_sql, dir_models, dir_data, dir_e
             ous = {}
             for ou in OperatingUnit:
                 files = sorted(glob.glob(f"{scratch_it}/AUG_{ou.name}.feather.*"))
+                def logged_read_feather(target):
+                    logger.info("[%s]: [LOAD] Input %s", iteration_count, target)
+                    return pd.read_feather(target)
+
                 if len(files) > 0:
-                    df = pd.concat(map(pd.read_feather, files))
+                    df = pd.concat(map(logged_read_feather, files))
                     df.reset_index(drop=True, inplace=True)
                     ous[ou.name] = df
                     continue
 
                 files = sorted(glob.glob(f"{scratch_it}/{ou.name}.feather.*"))
                 if len(files) > 0:
-                    df = pd.concat(map(pd.read_feather, files))
+                    df = pd.concat(map(logged_read_feather, files))
                     df.reset_index(drop=True, inplace=True)
                     ous[ou.name] = df
 

@@ -83,6 +83,9 @@ def generate_workload(config, mode_dir, benchbase_path, postgresql_config_file):
         "dump_db": config["dump_db"],
     }
 
+    if "dump_db_path" in config and config["dump_db_path"] is not None:
+        output["dump_db_path"] = config["dump_db_path"]
+
     output_post_execute = False
     for val in post_execute:
         output_post_execute |= val is not None

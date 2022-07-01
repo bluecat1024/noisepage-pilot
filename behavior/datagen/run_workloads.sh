@@ -209,6 +209,10 @@ for workload in "${workload_directory}"/*; do
                     then
                         # Dump the database.
                         dump_file="${benchmark_output}/dump.dir"
+                        if [ -n "$dump_db_path" ];
+                        then
+                            dump_file=$dump_db_path
+                        fi
                         ${pg_dump} -j 8 -F d -f "${dump_file}" benchbase
                     fi
                 fi

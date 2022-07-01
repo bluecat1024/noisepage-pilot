@@ -25,6 +25,8 @@ datagen:
     pg_analyze: True
     # Whether to dump the database.
     dump_db: False
+    # Location to dump the database to if we're dumping the database.
+    dump_db_path: null
 
     runs:
       # Options that describe each run. These arrays must have the same length.
