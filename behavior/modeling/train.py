@@ -86,6 +86,7 @@ def main(
     if not config_file.exists():
         raise ValueError(f"Config file: {config_file} does not exist")
 
+    logger.info("Loading config file: %s", config_file)
     with config_file.open("r") as f:
         config = yaml.load(f, Loader=yaml.FullLoader)["modeling"]
 

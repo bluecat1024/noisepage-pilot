@@ -119,8 +119,8 @@ def _guess_extend_relation(tbl_metadata, total_inserts):
     num_tuples_per_page = math.floor((_est_available_page_size() * fill_factor) / _est_tuple_key_size(tbl_metadata['est_tuple_size']))
     new_free_slots = math.floor((_est_available_page_size() * (1 - fill_factor) / _est_tuple_key_size(tbl_metadata['est_tuple_size'])))
 
-    old_new_pages = math.ceil(tbl_metadata["sim_inserts"] / num_tuples_per_page) + 1
-    new_pages = math.ceil((tbl_metadata["sim_inserts"] + total_inserts) / num_tuples_per_page) + 1
+    old_new_pages = math.floor(tbl_metadata["sim_inserts"] / num_tuples_per_page) + 1
+    new_pages = math.floor((tbl_metadata["sim_inserts"] + total_inserts) / num_tuples_per_page) + 1
 
     # TODO(wz2): We return new_free_slots and once again make the assumption that they are distributed
     # uniformally (when we know they aren't bonk).
@@ -405,8 +405,10 @@ def _compute_derived_ous(conn, ou, template_ous, metadata):
 
         # IndexOnlyScan/IndexScan need both num_iterator_used and num_outer_loops (for NestLoop).
         ou[f"{prefix}_num_iterator_used"] = get_key("plan_rows", ou)
+        ou[f"{prefix}_num_outer_loops"] = 1.0
         for other_ou in template_ous:
             if other_ou["node_type"] == OperatingUnit.NestLoop.name and other_ou["right_child_node_id"] == ou["plan_node_id"]:
+                # We don't mutate num_iterator_used because num_iterator_used is already set to the "per-iteration".
                 ou[f"{prefix}_num_outer_loops"] = get_plan_rows_matching_plan_id(other_ou["left_child_node_id"])
                 break
 

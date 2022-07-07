@@ -112,7 +112,7 @@ def load_tscout_data(data_dir):
     return unified, features, extra_files
 
 
-def diff_query_invocation(subinvocation, diffed_matrices):
+def diff_query_invocation(subinvocation, diffed_matrices, measurement_overhead_us, per_tuple_overhead_us):
     """
     Diffs a given query invocation by calling a CPython function.
 
@@ -136,7 +136,7 @@ def diff_query_invocation(subinvocation, diffed_matrices):
     matrix = subinvocation.to_numpy(dtype=np.float64, copy=False)
 
     try:
-        diff_query_tree(matrix)
+        diff_query_tree(matrix, measurement_overhead_us, per_tuple_overhead_us)
     except DiffPlanInvalidDataException as e:
         print("Invalid Data detected for subinvocation", subinvocation, matrix)
         raise e
@@ -190,7 +190,7 @@ def separate_subinvocation(start_times, end_times, root_start_times, root_end_ti
     subinvocations[:] = [-1 if len(intersect) == 0 else intersect[0] for intersect in intersects]
 
 
-def process_query_invocation(subframe, diffed_matrices):
+def process_query_invocation(subframe, diffed_matrices, measurement_overhead_us, per_tuple_overhead_us):
     """
     Function used to difference all data associated with a given query session template.
 
@@ -224,14 +224,20 @@ def process_query_invocation(subframe, diffed_matrices):
         subframe["subinvocation_id"] = subinvocation_ids
 
         # Now group by subinvocation_id and apply diff_query_invocation.
-        subframe.groupby(by=["subinvocation_id"]).apply(diff_query_invocation, diffed_matrices=diffed_matrices)
+        subframe.groupby(by=["subinvocation_id"]).apply(diff_query_invocation,
+                                                        diffed_matrices=diffed_matrices,
+                                                        measurement_overhead_us=measurement_overhead_us,
+                                                        per_tuple_overhead_us=per_tuple_overhead_us)
         return None
 
-    diff_query_invocation(subframe, diffed_matrices=diffed_matrices)
+    diff_query_invocation(subframe,
+                          diffed_matrices=diffed_matrices,
+                          measurement_overhead_us=measurement_overhead_us,
+                          per_tuple_overhead_us=per_tuple_overhead_us)
     return None
 
 
-def diff_queries(unified, diffed_matrices):
+def diff_queries(unified, diffed_matrices, measurement_overhead_us, per_tuple_overhead_us):
     """
     Diff all queries in the input data.
 
@@ -250,7 +256,10 @@ def diff_queries(unified, diffed_matrices):
 
     # We use apply() because we want to process the entire subframe as a single unit. transform() will not work
     # for this because transform() may separate the columns.
-    invocation_groups.progress_apply(process_query_invocation, diffed_matrices=diffed_matrices)
+    invocation_groups.progress_apply(process_query_invocation,
+                                     diffed_matrices=diffed_matrices,
+                                     measurement_overhead_us=measurement_overhead_us,
+                                     per_tuple_overhead_us=per_tuple_overhead_us)
 
 
 def save_results(diff_data_dir, ou_to_features, unified, output_ous, extra_files):
@@ -294,7 +303,7 @@ def save_results(diff_data_dir, ou_to_features, unified, output_ous, extra_files
         shutil.copy(extra_file, f"{diff_data_dir}/{extra_file.stem}{extra_file.suffix}")
 
 
-def main(data_dir, output_dir, experiment, output_ous) -> None:
+def main(data_dir, output_dir, experiment, output_ous, measurement_overhead_us, per_tuple_overhead_us) -> None:
     logger.info("Differencing experiment: %s", experiment)
     experiment_root: Path = data_dir / experiment
     bench_names: list[str] = [d.name for d in experiment_root.iterdir() if d.is_dir()]
@@ -314,12 +323,12 @@ def main(data_dir, output_dir, experiment, output_ous) -> None:
         unified.reset_index(drop=True, inplace=True)
         unified["subinvocation_id"] = -1
         diffed_matrices: list[np.ndarray] = []
-        diff_queries(unified, diffed_matrices)
+        diff_queries(unified, diffed_matrices, measurement_overhead_us, per_tuple_overhead_us)
 
         # Concatenate diffed_matrices back into a single dataframe.
         unified_np = np.concatenate(diffed_matrices, axis=0)
         unified_replace = DataFrame(unified_np, copy=False, columns=unified.columns)
-        unified_replace.drop("subinvocation_id", axis=1, inplace=True)
+        unified_replace.drop(["subinvocation_id", "invocation_count"], axis=1, inplace=True)
 
         # Replace the following columns from unified -> unified_replace.
         labels_replace = ["query_id", "db_id", "statement_timestamp"]
@@ -355,6 +364,20 @@ class DiffCLI(cli.Application):
         default=",".join([node.name for node in OperatingUnit]),
         help="List of OUs to output that are comma separated."
     )
+    measurement_overhead_us = cli.SwitchAttr(
+        "--measurement-overhead-us",
+        float,
+        mandatory=False,
+        help="TScout overhead to perform 1 entire measurement cycle.",
+        default=0.0
+    )
+    per_tuple_overhead_us = cli.SwitchAttr(
+        "--per-tuple-overhead-us",
+        float,
+        mandatory=False,
+        help="TScout overhead to perform measurement for subsequent tuples.",
+        default=0.0
+    )
 
     def main(self):
         tqdm.pandas()
@@ -368,7 +391,12 @@ class DiffCLI(cli.Application):
         output_ous = self.output_ous.split(",")
 
         for experiment in experiments:
-            main(self.dir_datagen_data, self.dir_output, experiment, output_ous)
+            main(self.dir_datagen_data,
+                 self.dir_output,
+                 experiment,
+                 output_ous,
+                 np.float64(self.measurement_overhead_us),
+                 np.float64(self.per_tuple_overhead_us))
 
 
 if __name__ == "__main__":

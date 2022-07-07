@@ -39,7 +39,8 @@ QSS_STATS_OUS = [
     OperatingUnit.ModifyTableIndexInsert,
     OperatingUnit.LockRows,
     OperatingUnit.Agg,
-    OperatingUnit.NestLoop
+    OperatingUnit.NestLoop,
+    OperatingUnit.AfterQueryTrigger,
 ]
 
 #################################
@@ -78,6 +79,8 @@ DIFF_SCHEMA_METADATA = ["ou_index", "data_id"] + UNIQUE_QUERY_ID_INDEX + [
         "plan_node_id",
         "left_child_plan_node_id",
         "right_child_plan_node_id",
+
+        "invocation_count",
     ]
 
 # DIFF_SCHEMA_METADATA with all the target columns that need to be differenced.
@@ -88,6 +91,8 @@ DIFF_SCHEMA_WITH_TARGETS = DIFF_SCHEMA_METADATA + ["total_cost", "startup_cost"]
 DIFF_PLAN_NODE_ID_SCHEMA_INDEX = DIFF_SCHEMA_WITH_TARGETS.index("plan_node_id")
 DIFF_LEFT_CHILD_PLAN_NODE_ID_SCHEMA_INDEX = DIFF_SCHEMA_WITH_TARGETS.index("left_child_plan_node_id")
 DIFF_RIGHT_CHILD_PLAN_NODE_ID_SCHEMA_INDEX = DIFF_SCHEMA_WITH_TARGETS.index("right_child_plan_node_id")
+DIFF_INVOCATION_COUNT_SCHEMA_INDEX = DIFF_SCHEMA_WITH_TARGETS.index("invocation_count")
+DIFF_ELAPSED_US_SCHEMA_INDEX = DIFF_SCHEMA_WITH_TARGETS.index("elapsed_us")
 DIFF_TARGET_START_SCHEMA_INDEX = DIFF_SCHEMA_WITH_TARGETS.index("total_cost")
 
 

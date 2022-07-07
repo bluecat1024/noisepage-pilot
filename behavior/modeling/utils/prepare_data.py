@@ -36,23 +36,34 @@ def purify_index_input_data(df):
         # make sure there are no longer any negative numbers in distinct...
         assert (df[distinct_key] < 0).sum() == 0
 
-    # TODO(wz2): Encode summary statistics as much as possible.
+    # TODO(wz2): Here we try to encode summary statistics as much as possible.
     slot = [
         "indkey_attlen_",
-        "indkey_attypmod_",
+        "indkey_atttypmod_",
         "indkey_attvarying_",
-        "indkey_n_distinct_"
+        "indkey_n_distinct_",
+        "indkey_avg_width_",
+
+        # TODO(wz2): Null Fraction is dropped since there's no good way of representing this.
+        # Models probably also don't need this. Similar reasoning for correlation.
+        "indkey_null_frac_",
+        "indkey_correlation_",
     ]
     blocked = ([col for col in df.columns for prefix in slot if prefix in col])
     if len(blocked) > 0:
         varying_keys = [col for col in df.columns if "indkey_attvarying_" in col]
         attlen_keys = [col for col in df.columns if "indkey_attlen_" in col]
         atttypmod_keys = [col for col in df.columns if "indkey_attypmod_" in col]
+        avg_width_keys = [col for col in df.columns if "indkey_avg_width_" in col]
+
         df["indkey_cum_attvarying"] = 0
         df["indkey_cum_attfixed"] = 0
         df["indkey_cum_attlen"] = 0
+        df["indkey_cum_avg_width"] = 0
         for col in varying_keys:
             df["indkey_cum_attvarying"] += (df[col].fillna(0))
+        for col in avg_width_keys:
+            df["indkey_cum_avg_width"] += (df[col].fillna(0))
         for col in attlen_keys:
             df["indkey_cum_attfixed"] += ((df[col].fillna(0)) != -1).astype(int)
         filter_check = lambda x: x >= 0
@@ -61,13 +72,7 @@ def purify_index_input_data(df):
         for col in atttypmod_keys:
             df["indkey_cum_attlen"] += (df[col].fillna(0)).where(filter_check, 0)
         df.drop(columns=blocked, inplace=True, errors='raise')
-
-    if "IndexScan_num_outer_loops" in df.columns:
-        div_cols = TARGET_COLUMNS + ["IndexScan_num_iterator_used", "IndexScan_num_heap_fetches"]
-        div_cols = [col for col in div_cols if col in df]
-        if len(div_cols) > 0:
-            df[div_cols] = df[div_cols].div(df.IndexScan_num_outer_loops, axis=0)
-            df.drop(columns=["IndexScan_num_outer_loops"], inplace=True, errors='raise')
+    return df
 
 
 def clean_input_data(df, settings, stats, is_train):
@@ -148,7 +153,16 @@ def clean_input_data(df, settings, stats, is_train):
     blocked.extend([col for col in df.columns if col.endswith("oid")])
 
     # Clean and perform any relevant operations on the input data.
-    purify_index_input_data(df)
+    df = purify_index_input_data(df)
+
+    # This is an OU-specific dataframe operation. Why? Well because we want the num_outer_loops
+    # to handle the query-level "nested" behavior.
+    if "IndexScan_num_outer_loops" in df.columns:
+        div_cols = TARGET_COLUMNS + ["IndexScan_num_iterator_used", "IndexScan_num_heap_fetches"]
+        div_cols = [col for col in div_cols if col in df]
+        if len(div_cols) > 0:
+            df[div_cols] = df[div_cols].div(df.IndexScan_num_outer_loops, axis=0)
+            df.drop(columns=["IndexScan_num_outer_loops"], inplace=True, errors='raise')
 
     # TODO(wz2): I think we should drop state variables other than below? Why?
     # Because these are transitory and sort of capture the "end" of execution state
@@ -218,6 +232,7 @@ def prepare_inference_query_stream(dir_data):
     query_stats = pg_qss_stats[pg_qss_stats.plan_node_id == -1]
     query_stats.rename(columns={"counter0": "total_elapsed_us"}, inplace=True)
     query_stats.drop(columns=[f"counter{i}" for i in range(1, 10)] + ["plan_node_id"], inplace=True, errors='raise')
+    query_stats["params"] = query_stats.params.fillna('')
     del pg_qss_stats
     gc.collect()
 
@@ -255,7 +270,7 @@ def prepare_inference_query_stream(dir_data):
 
     # Parametrize the query. (not done with apply due to memory constraints).
     for query in tqdm(query_stats.itertuples(), total=query_stats.shape[0]):
-        matches = re.findall(r'(\$\w+) = (\'[^\']*\')', query.params)
+        matches = re.findall(r'(\$\w+) = (\'(?:[^\']*(?:\'\')?[^\']*)*\')', query.params)
         query_text = query.query_text
         for match in matches:
             query_text = query_text.replace(match[0], match[1])

@@ -6,7 +6,6 @@ from pathlib import Path
 from enum import Enum, auto, unique
 import pandas as pd
 import numpy as np
-from behavior.plans import DIFF_SCHEMA_METADATA
 from behavior.modeling import featurize
 from behavior.modeling.utils.prepare_data import load_input_data
 from sklearn.metrics import (

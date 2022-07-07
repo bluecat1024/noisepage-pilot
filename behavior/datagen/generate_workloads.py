@@ -81,6 +81,7 @@ def generate_workload(config, mode_dir, benchbase_path, postgresql_config_file):
         "pg_configs": pg_configs,
         "benchbase_configs": benchbase_configs,
         "dump_db": config["dump_db"],
+        "enable_tscout": config["enable_tscout"],
     }
 
     if "dump_db_path" in config and config["dump_db_path"] is not None:

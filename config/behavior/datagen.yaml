@@ -27,6 +27,8 @@ datagen:
     dump_db: False
     # Location to dump the database to if we're dumping the database.
     dump_db_path: null
+    # Whether to enable TScout and extended statistics collection.
+    enable_tscout: True
 
     runs:
       # Options that describe each run. These arrays must have the same length.

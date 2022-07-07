@@ -228,6 +228,16 @@ for workload in "${workload_directory}"/*; do
 
                 # Install QSS extension
                 doit noisepage_qss_install --dbname=benchbase
+                if [ "$enable_tscout" != 'False' ];
+                then
+                    ${psql} --dbname=benchbase --csv --command="ALTER SYSTEM SET qss_capture_exec_stats = ON;"
+                    ${psql} --dbname=benchbase --csv --command="ALTER SYSTEM SET tscout_executor_sampling_rate = 1.0;"
+                    ${pg_ctl} restart -D "${PGDATA_LOCATION}" -m smart
+                else
+                    ${psql} --dbname=benchbase --csv --command="ALTER SYSTEM SET qss_capture_exec_stats = OFF;"
+                    ${psql} --dbname=benchbase --csv --command="ALTER SYSTEM SET tscout_executor_sampling_rate = 0.0;"
+                    ${pg_ctl} restart -D "${PGDATA_LOCATION}" -m smart
+                fi
 
                 # shellcheck disable=2154 # populated by niet
                 if [ "$pg_analyze" != 'False' ];
@@ -265,16 +275,22 @@ for workload in "${workload_directory}"/*; do
                 fi
             fi
 
-            # Initialize TScout. We currently don't have a means by which to check whether
-            # TScout has successfully attached to the instance. As such, we (wait) 5 seconds.
-            append=$( [[ $i != "0" ]] && echo "True" || echo "False" )
-            doit tscout_init --output_dir="${benchmark_output}" --wait_time=10 --collector_fast_interval=1 --collector_slow_interval=30 --append="${append}"
+            if [ "$enable_tscout" != 'False' ];
+            then
+                # Initialize TScout. We currently don't have a means by which to check whether
+                # TScout has successfully attached to the instance. As such, we (wait) 5 seconds.
+                append=$( [[ $i != "0" ]] && echo "True" || echo "False" )
+                doit tscout_init --output_dir="${benchmark_output}" --wait_time=10 --collector_fast_interval=1 --collector_slow_interval=30 --append="${append}"
+            fi
 
             # Execute the benchmark
             doit benchbase_run --benchmark="${benchmark}" --config="${benchbase_config_path}" --args="--execute=true"
 
-            # Shutdown TScout and take ownership of the results and move into an indexed output directory.
-            doit tscout_shutdown --output_dir="${benchmark_output}" --wait_time=60
+            if [ "$enable_tscout" != 'False' ];
+            then
+                # Shutdown TScout and take ownership of the results and move into an indexed output directory.
+                doit tscout_shutdown --output_dir="${benchmark_output}" --wait_time=60
+            fi
 
             if [ ${i} == $((${#benchbase_configs[@]} - 1)) ];
             then

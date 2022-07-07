@@ -10,6 +10,8 @@ from behavior.plans import (
     DIFF_PLAN_NODE_ID_SCHEMA_INDEX,
     DIFF_LEFT_CHILD_PLAN_NODE_ID_SCHEMA_INDEX,
     DIFF_RIGHT_CHILD_PLAN_NODE_ID_SCHEMA_INDEX,
+    DIFF_INVOCATION_COUNT_SCHEMA_INDEX,
+    DIFF_ELAPSED_US_SCHEMA_INDEX,
     DIFF_TARGET_START_SCHEMA_INDEX,
     DiffPlanIncompleteSubinvocationException,
     DiffPlanInvalidDataException,
@@ -35,7 +37,7 @@ ctypedef np.int64_t ITYPE_t
 # Skip checking bounds and wraparound for performance.
 @cython.boundscheck(False)
 @cython.wraparound(False)
-def diff_query_tree(np.ndarray[FTYPE_t, ndim=2] matrix):
+def diff_query_tree(np.ndarray[FTYPE_t, ndim=2] matrix, FTYPE_t measurement_overhead_us, FTYPE_t per_tuple_overhead_us):
     cdef int rows = np.PyArray_DIMS(matrix)[0]
     # Subtract 1 since the last column is subinvocation_id and we don't "difference" that.
     cdef int col = np.PyArray_DIMS(matrix)[1] - 1
@@ -44,6 +46,8 @@ def diff_query_tree(np.ndarray[FTYPE_t, ndim=2] matrix):
     cdef int left_id = DIFF_LEFT_CHILD_PLAN_NODE_ID_SCHEMA_INDEX
     cdef int right_id = DIFF_RIGHT_CHILD_PLAN_NODE_ID_SCHEMA_INDEX
     cdef int target = DIFF_TARGET_START_SCHEMA_INDEX
+    cdef int elapsed_us = DIFF_ELAPSED_US_SCHEMA_INDEX
+    cdef int invocation_count = DIFF_INVOCATION_COUNT_SCHEMA_INDEX
 
     # Define a 1 dimensional array that has the same length as the number of rows.
     # offset is used to build a mapping offset[i] = Y such that plan node ID [i]
@@ -92,6 +96,11 @@ def diff_query_tree(np.ndarray[FTYPE_t, ndim=2] matrix):
             # In this case, there is a valid left child plan. Difference the metrics and
             # record the left child plan node ID so we difference it next.
             matrix[head, target:col] -= matrix[offset[left], target:col]
+            it_count = matrix[offset[left], invocation_count]
+            if it_count > 0:
+                matrix[head, elapsed_us] -= measurement_overhead_us
+                matrix[head, elapsed_us] -= (it_count - 1) * per_tuple_overhead_us
+
             access[tail] = left
             tail += 1
 
@@ -99,6 +108,11 @@ def diff_query_tree(np.ndarray[FTYPE_t, ndim=2] matrix):
             # In this case, there is a valid right child plan. Difference the metrics and
             # record the right child plan node ID so we difference it next.
             matrix[head, target:col] -= matrix[offset[right], target:col]
+            it_count = matrix[offset[right], invocation_count]
+            if it_count > 0:
+                matrix[head, elapsed_us] -= measurement_overhead_us
+                matrix[head, elapsed_us] -= (it_count - 1) * per_tuple_overhead_us
+
             access[tail] = right
             tail += 1
 

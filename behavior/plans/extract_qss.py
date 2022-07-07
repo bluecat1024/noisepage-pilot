@@ -154,6 +154,9 @@ def main(data_dir, output_dir, experiment, output_ous) -> None:
         pg_qss_plans = bench_root / "pg_qss_plans.csv"
         pg_qss_stats = bench_root / "pg_qss_stats.csv"
         tscout_data_dir = bench_root / "tscout"
+        if not tscout_data_dir.exists():
+            logger.info("Skipping %s", bench_name)
+            continue
 
         assert pg_qss_stats.exists() and pg_qss_plans.exists()
 

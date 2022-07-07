@@ -223,8 +223,14 @@ def task_behavior_perform_plan_diff():
     Behavior modeling: perform plan differencing.
     """
 
-    def datadiff_action(glob_pattern, output_ous):
-        datadiff_args = f"--dir-datagen-data {ARTIFACT_DATA_QSS} " f"--dir-output {ARTIFACT_DATA_DIFF} "
+    def datadiff_action(glob_pattern, output_ous, measurement_overhead_us, per_tuple_overhead_us):
+        datadiff_args = (
+            f"--dir-datagen-data {ARTIFACT_DATA_QSS} "
+            f"--dir-output {ARTIFACT_DATA_DIFF} "
+            f"--measurement-overhead-us {measurement_overhead_us} "
+            f"--per-tuple-overhead-us {per_tuple_overhead_us} "
+        )
+
         if glob_pattern is not None:
             datadiff_args = datadiff_args + f"--glob-pattern '{glob_pattern}'"
 
@@ -261,6 +267,18 @@ def task_behavior_perform_plan_diff():
                 "long": "output_ous",
                 "help": "Comma separated list of OUs to output.",
                 "default": None,
+            },
+            {
+                "name": "measurement_overhead_us",
+                "long": "measurement_overhead_us",
+                "help": "TScout overhead to perform 1 entire measurement cycle.",
+                "default": 0.0,
+            },
+            {
+                "name": "per_tuple_overhead_us",
+                "long": "per_tuple_overhead_us",
+                "help": "TScout overhead to measure an additional auxiliary tuple.",
+                "default": 0.0,
             }
         ],
     }
@@ -295,9 +313,9 @@ def task_behavior_train():
     Behavior modeling: train OU models.
     """
 
-    def train_cmd(use_featurewiz, train_data, prefix_allow_derived_features):
+    def train_cmd(use_featurewiz, config_file, train_data, prefix_allow_derived_features):
         train_args = (
-            f"--config-file {MODELING_CONFIG_FILE} "
+            f"--config-file {config_file} "
             f"--dir-data {train_data} "
             f"--dir-output {ARTIFACT_MODELS} "
         )
@@ -323,6 +341,12 @@ def task_behavior_train():
                 "default": False,
             },
             {
+                "name": "config_file",
+                "long": "config_file",
+                "help": "Path to configuration file to use.",
+                "default": MODELING_CONFIG_FILE,
+            },
+            {
                 "name": "train_data",
                 "long": "train_data",
                 "help": "Root of a recursive glob to gather all feather files for training data.",
@@ -333,7 +357,7 @@ def task_behavior_train():
                 "long": "prefix_allow_derived_features",
                 "help": "List of prefixes to use for selecting derived features for training the model.",
                 "default": "",
-            }
+            },
         ],
     }
 
@@ -404,7 +428,7 @@ def task_behavior_eval_query():
     """
     Behavior modeling: perform query-level model analysis.
     """
-    def eval_cmd(session_sql, eval_raw_data, skip_generate_plots, base_models, psycopg2_conn, num_iterations):
+    def eval_cmd(session_sql, eval_raw_data, base_models, psycopg2_conn, num_iterations):
         if base_models is None:
             # Find the latest experiment by last modified timestamp.
             experiment_list = sorted((exp_path for exp_path in ARTIFACT_MODELS.glob("*")), key=os.path.getmtime)
@@ -426,9 +450,6 @@ def task_behavior_eval_query():
         if session_sql is not None:
             eval_args = eval_args + f"--session-sql {session_sql} "
 
-        if not skip_generate_plots:
-            eval_args = eval_args + "--generate-plots"
-
         return f"python3 -m behavior eval_query {eval_args}"
 
     return {
@@ -448,13 +469,6 @@ def task_behavior_eval_query():
                 "long": "eval_raw_data",
                 "help": "Path to root folder containing the RAW data for evaluation purposes.",
                 "default": None,
-            },
-            {
-                "name": "skip_generate_plots",
-                "long": "skip_generate_plots",
-                "help": "Flag of whether to skip generate plots or not.",
-                "type": bool,
-                "default": False
             },
             {
                 "name": "base_models",

@@ -35,7 +35,7 @@ def task_noisepage_clone():
     """
 
     def repo_clone(repo_url):
-        cmd = f"git clone {repo_url} --branch pg14 --single-branch --depth 1 {BUILD_PATH}"
+        cmd = f"git clone {repo_url} --branch new_pg14 --single-branch --depth 1 {BUILD_PATH}"
         return cmd
 
     return {
@@ -55,7 +55,7 @@ def task_noisepage_clone():
                 "name": "repo_url",
                 "long": "repo_url",
                 "help": "The repository to clone from.",
-                "default": "https://github.com/cmu-db/postgres.git",
+                "default": "https://github.com/17zhangw/postgres.git",
             },
         ],
     }

@@ -44,39 +44,6 @@ def load_models(path):
     return model_dict
 
 
-def write_results(query_stats, generate_plots, base_output):
-    # Write the query level predictions and true runtime to output.
-    query_stats.to_feather(base_output / "query_results.feather")
-
-    if generate_plots:
-        # Output error distribution plots based on query_id.
-        query_stats["predicted_minus_elapsed"] = query_stats["pred_elapsed_us"] - query_stats["total_elapsed_us"]
-        qid_groups = query_stats.groupby(by=["query_id"])
-        for group in qid_groups:
-            fig, axes = plt.subplots(2, 1, figsize=(12.8, 7.2))
-            ax = axes[0]
-
-            # Plot elapsed and predicted elapsed time on the same graph as a scatter.
-            group[1].plot(title=f"qid: {group[0]}", x="order", y="total_elapsed_us", color='r', ax=ax, kind='scatter')
-            group[1].plot(title=f"qid: {group[0]}", x="order", y="pred_elapsed_us", color='b', ax=ax, kind='scatter')
-            ax.set_xticks([])
-
-            if len(group[1]) > 1 and len(group[1].predicted_minus_elapsed.value_counts()) > 1:
-                # Only plot the second graph if there is more than 1 distinct value.
-                ax = axes[1]
-                group[1].predicted_minus_elapsed.plot.kde(color='r', ax=ax)
-
-                percentiles = [2.5, 5, 25, 50, 75, 95, 97.5]
-                percents = np.percentile(group[1].predicted_minus_elapsed, percentiles)
-                bounds = [group[1].predicted_minus_elapsed.min(), group[1].predicted_minus_elapsed.max()]
-                ax.scatter(bounds, [0, 0], color='b')
-                ax.scatter(percents, np.zeros(len(percentiles)), color='g')
-                ax.set_xlabel("predicted - elapsed")
-
-            plt.savefig(base_output / "plots" / f"{group[0]}.png")
-            plt.close()
-
-
 def augment_ous(scratch_it, sliced_metadata, conn):
     # Prepare all the augmented catalog data in timestamp order.
     aug_dfs = prepare_augmentation_data(sliced_metadata, conn)
@@ -127,7 +94,7 @@ def augment_ous(scratch_it, sliced_metadata, conn):
                 remapper = {column:f"indkey_{column}_{idx}" for column in time_pg_stats.columns}
                 data.rename(columns=remapper, inplace=True)
 
-            purify_index_input_data(data)
+            data = purify_index_input_data(data)
             data.reset_index(drop=True, inplace=True)
             data.to_feather(scratch_it / f"AUG_{augment.name}.feather{Path(target_file).suffix}")
 
@@ -150,11 +117,25 @@ def evaluate_query_plans(split_query_stream, plan_features, base_models, output_
     eval_df_features = []
     for ou_type in plan_features:
         assert OperatingUnit[ou_type] != OperatingUnit.AfterQueryTrigger
-        df = evaluate_ou_model(base_models[ou_type], None, None, eval_df=plan_features[ou_type], return_df=True, output=False)
+        if ou_type not in base_models:
+            # If we don't have the model for the particular OU, we just predict 0.
+            df = plan_features[ou_type]
+            df["pred_elapsed_us"] = 0
+            # Set a bit in [error_missing_model]
+            df["error_missing_model"] = 1
+        else:
+            df = evaluate_ou_model(base_models[ou_type], None, None, eval_df=plan_features[ou_type], return_df=True, output=False)
+            df["error_missing_model"] = 0
+
+        if OperatingUnit[ou_type] == OperatingUnit.IndexOnlyScan or OperatingUnit[ou_type] == OperatingUnit.IndexScan:
+            # TODO(wz2): Assume each other loop executes with the same latency.
+            prefix = "IndexOnlyScan" if OperatingUnit[ou_type] == OperatingUnit.IndexOnlyScan else "IndexScan"
+            df["pred_elapsed_us"] = df.pred_elapsed_us * df[f"{prefix}_num_outer_loops"]
+
         if output_path is not None:
             df.to_feather(output_path / f"{ou_type}_evals.feather")
 
-        keep_columns = ["query_id", "order", "plan_node_id", "pred_elapsed_us"]
+        keep_columns = ["query_id", "order", "plan_node_id", "pred_elapsed_us", "error_missing_model"]
         df.drop(columns=[col for col in df.columns if col not in keep_columns], inplace=True)
         eval_df_features.append(df)
 
@@ -168,7 +149,7 @@ def evaluate_query_plans(split_query_stream, plan_features, base_models, output_
     unified_df.set_index(keys=["order"], drop=True, append=False, inplace=True)
 
     reconstitute_stream = pd.concat(split_query_stream)
-    reconstitute_stream.drop(columns=["pred_elapsed_us"], inplace=True, errors='ignore')
+    reconstitute_stream.drop(columns=["pred_elapsed_us", "error_missing_model"], inplace=True, errors='ignore')
     reconstitute_stream.set_index(keys=["order"], drop=True, append=False, inplace=True)
     reconstitute_stream.sort_index(axis=0, inplace=True)
 
@@ -205,7 +186,7 @@ def _slice_queries(query_stream, conn, scratch_it, iteration_count):
     return sliced_query_stream, sliced_metadata
 
 
-def main(num_iterations, psycopg2_conn, session_sql, dir_models, dir_data, dir_evals_output, dir_scratch, generate_plots):
+def main(num_iterations, psycopg2_conn, session_sql, dir_models, dir_data, dir_evals_output, dir_scratch):
     # Load the models
     base_models = load_models(dir_models)
 
@@ -236,19 +217,19 @@ def main(num_iterations, psycopg2_conn, session_sql, dir_models, dir_data, dir_e
                 iteration_count = iteration_count + 1
                 continue
             elif iteration_count == 0:
-                logger.info("[%s]: Processing queries", iteration_count)
+                logger.info("[%s, %s]: Processing queries", iteration_count, datetime.now())
                 query_stream = _process_queries(dir_data, scratch)
 
-            logger.info("[%s]: Slicing query stream based on vacuum", iteration_count)
+            logger.info("[%s, %s]: Slicing query stream based on vacuum", iteration_count, datetime.now())
             sliced_query_stream, sliced_metadata = _slice_queries(query_stream, conn, scratch_it, iteration_count)
-            logger.info("[%s]: Produced [%s] query streams based on vacuum analysis", iteration_count, len(sliced_query_stream))
+            logger.info("[%s, %s]: Produced [%s] query streams based on vacuum analysis", iteration_count, datetime.now(), len(sliced_query_stream))
             del query_stream
 
-            logger.info("[%s]: Generate query operating units", iteration_count)
+            logger.info("[%s, %s]: Generate query operating units", iteration_count, datetime.now())
             if not (scratch_it / "generate_query_ous").exists():
                 generate_query_ous(sliced_query_stream, sliced_metadata, conn, scratch_it)
 
-            logger.info("[%s]: Augmenting query operating units", iteration_count)
+            logger.info("[%s, %s]: Augmenting query operating units", iteration_count, datetime.now())
             if not (scratch_it / "augment_query_ous").exists():
                 augment_ous(scratch_it, sliced_metadata, conn)
 
@@ -257,11 +238,9 @@ def main(num_iterations, psycopg2_conn, session_sql, dir_models, dir_data, dir_e
 
             target_output = base_output / f"preds_{iteration_count}"
             target_output.mkdir(parents=True, exist_ok=True)
-            if generate_plots:
-                (target_output / "plots").mkdir(parents=True, exist_ok=True)
 
             # Load all the OU data.
-            logger.info("[%s]: Loading all query data", iteration_count)
+            logger.info("[%s, %s]: Loading all query data", iteration_count, datetime.now())
             ous = {}
             for ou in OperatingUnit:
                 files = sorted(glob.glob(f"{scratch_it}/AUG_{ou.name}.feather.*"))
@@ -282,14 +261,13 @@ def main(num_iterations, psycopg2_conn, session_sql, dir_models, dir_data, dir_e
                     ous[ou.name] = df
 
             # Evaluate query plans and relase resources.
-            logger.info("[%s]: Evaluating query plans", iteration_count)
+            logger.info("[%s, %s]: Evaluating query plans", iteration_count, datetime.now())
             query_stream = evaluate_query_plans(sliced_query_stream, ous, base_models, target_output)
             del sliced_query_stream
             del ous
 
             # Generate prediction plots.
-            logger.info("[%s]: Generating prediction plots", iteration_count)
-            write_results(query_stream, generate_plots and iteration_count == (num_iterations - 1), target_output)
+            query_stream.to_feather(target_output / "query_results.feather")
             query_stream.to_feather(scratch_it / "final_query.feather")
 
             iteration_count = iteration_count + 1
@@ -324,10 +302,6 @@ class EvalQueryCLI(cli.Application):
         help="Folder to use as scratch space.",
         default = Path("/tmp/"),
     )
-    generate_plots = cli.Flag(
-        "--generate-plots",
-        default = False
-    )
     dir_models = cli.SwitchAttr(
         "--dir-base-models",
         Path,
@@ -353,8 +327,7 @@ class EvalQueryCLI(cli.Application):
              self.dir_models,
              self.dir_data,
              self.dir_evals_output,
-             self.dir_scratch,
-             self.generate_plots)
+             self.dir_scratch)
 
 
 if __name__ == "__main__":
