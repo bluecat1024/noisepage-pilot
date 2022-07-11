@@ -223,11 +223,10 @@ def task_behavior_perform_plan_diff():
     Behavior modeling: perform plan differencing.
     """
 
-    def datadiff_action(glob_pattern, output_ous, measurement_overhead_us, per_tuple_overhead_us):
+    def datadiff_action(glob_pattern, output_ous, per_tuple_overhead_us):
         datadiff_args = (
             f"--dir-datagen-data {ARTIFACT_DATA_QSS} "
             f"--dir-output {ARTIFACT_DATA_DIFF} "
-            f"--measurement-overhead-us {measurement_overhead_us} "
             f"--per-tuple-overhead-us {per_tuple_overhead_us} "
         )
 
@@ -269,15 +268,9 @@ def task_behavior_perform_plan_diff():
                 "default": None,
             },
             {
-                "name": "measurement_overhead_us",
-                "long": "measurement_overhead_us",
-                "help": "TScout overhead to perform 1 entire measurement cycle.",
-                "default": 0.0,
-            },
-            {
                 "name": "per_tuple_overhead_us",
                 "long": "per_tuple_overhead_us",
-                "help": "TScout overhead to measure an additional auxiliary tuple.",
+                "help": "TScout overhead to measure child plan tuples.",
                 "default": 0.0,
             }
         ],

@@ -272,8 +272,15 @@ def prepare_inference_query_stream(dir_data):
     for query in tqdm(query_stats.itertuples(), total=query_stats.shape[0]):
         matches = re.findall(r'(\$\w+) = (\'(?:[^\']*(?:\'\')?[^\']*)*\')', query.params)
         query_text = query.query_text
-        for match in matches:
-            query_text = query_text.replace(match[0], match[1])
+        if len(matches) > 0:
+            parts = []
+            for match in matches:
+                start = query_text.find(match[0])
+                parts.append(query_text[:start])
+                parts.append(match[1])
+                query_text = query_text[start+len(match[0]):]
+            parts.append(query_text)
+            query_text = "".join(parts)
         query_stats.at[query.Index, "query_text"] = query_text
     query_stats.drop(labels=["params", "id", "generation"], axis=1, inplace=True)
 

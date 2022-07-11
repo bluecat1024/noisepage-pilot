@@ -272,7 +272,8 @@ def _compute_next_window_statistics(query_stream_slice, previous_stats, tables_p
             num_new_pages += npage
 
         # This is about logical tuples to the relation.
-        new_stats["pg_class"][tbl]["reltuples"] = previous_stats["pg_class"][tbl]["reltuples"] + delta_inserts - delta_deletes
+        # Cap the statistics at 0. It is possible because we assume the delete will always succeed with 1 tuple.
+        new_stats["pg_class"][tbl]["reltuples"] = max(0, previous_stats["pg_class"][tbl]["reltuples"] + delta_inserts - delta_deletes)
         # Update the estimate on how many new pages there will be after executing the segment.
         new_stats["pg_class"][tbl]["relpages"] += num_new_pages
 

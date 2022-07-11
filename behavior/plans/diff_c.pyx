@@ -37,7 +37,7 @@ ctypedef np.int64_t ITYPE_t
 # Skip checking bounds and wraparound for performance.
 @cython.boundscheck(False)
 @cython.wraparound(False)
-def diff_query_tree(np.ndarray[FTYPE_t, ndim=2] matrix, FTYPE_t measurement_overhead_us, FTYPE_t per_tuple_overhead_us):
+def diff_query_tree(np.ndarray[FTYPE_t, ndim=2] matrix, FTYPE_t per_tuple_overhead_us):
     cdef int rows = np.PyArray_DIMS(matrix)[0]
     # Subtract 1 since the last column is subinvocation_id and we don't "difference" that.
     cdef int col = np.PyArray_DIMS(matrix)[1] - 1
@@ -98,8 +98,7 @@ def diff_query_tree(np.ndarray[FTYPE_t, ndim=2] matrix, FTYPE_t measurement_over
             matrix[head, target:col] -= matrix[offset[left], target:col]
             it_count = matrix[offset[left], invocation_count]
             if it_count > 0:
-                matrix[head, elapsed_us] -= measurement_overhead_us
-                matrix[head, elapsed_us] -= (it_count - 1) * per_tuple_overhead_us
+                matrix[head, elapsed_us] -= (it_count) * per_tuple_overhead_us
 
             access[tail] = left
             tail += 1
@@ -110,8 +109,7 @@ def diff_query_tree(np.ndarray[FTYPE_t, ndim=2] matrix, FTYPE_t measurement_over
             matrix[head, target:col] -= matrix[offset[right], target:col]
             it_count = matrix[offset[right], invocation_count]
             if it_count > 0:
-                matrix[head, elapsed_us] -= measurement_overhead_us
-                matrix[head, elapsed_us] -= (it_count - 1) * per_tuple_overhead_us
+                matrix[head, elapsed_us] -= (it_count) * per_tuple_overhead_us
 
             access[tail] = right
             tail += 1
