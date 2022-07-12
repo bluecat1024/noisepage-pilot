@@ -66,8 +66,8 @@ def _evaluate_query_for_plan(conn, query_str):
     if query_str in QUERY_CACHE and QUERY_CACHE[query_str] is not None:
         return copy.deepcopy(QUERY_CACHE[query_str])
     else:
-        # Execute EXPLAIN (format tscout) to get all the features that we want.
-        result = [r for r in conn.execute("EXPLAIN (format tscout) " + query_str, prepare=False)]
+        # Execute EXPLAIN (format noisepage) to get all the features that we want.
+        result = [r for r in conn.execute("EXPLAIN (format noisepage) " + query_str, prepare=False)]
         result = result[0][0]
 
         # Extract all the OUs for a given query_text plan.
@@ -76,19 +76,30 @@ def _evaluate_query_for_plan(conn, query_str):
 
         def extract_ou(plan):
             ou = {}
+
+            accum_total_cost = 0.0
+            accum_startup_cost = 0.0
             for key in plan:
                 value = plan[key]
                 if key == "Plans":
                     for p in plan[key]:
-                        extract_ou(p)
+                        child_total_cost, child_startup_cost = extract_ou(p)
+                        accum_total_cost += child_total_cost
+                        accum_startup_cost += child_startup_cost
                         continue
                 if isinstance(value, list):
                     # TODO(wz2): For now, we simply featurize a list[] with a numeric length.
                     # This is likely insufficient if the content of the list matters significantly.
                     ou[key + "_len"] = len(value)
                 ou[key] = value
+
+            cur_total_cost = ou["total_cost"]
+            cur_startup_cost = ou["startup_cost"]
+            ou["total_cost"] -= accum_total_cost
+            ou["startup_cost"] -= accum_startup_cost
             ou["query_text"] = query_str
             template_ous.append(ou)
+            return cur_total_cost, cur_startup_cost
         extract_ou(features)
 
         if query_str in QUERY_CACHE:
@@ -308,7 +319,7 @@ def _compute_next_window_statistics(query_stream_slice, previous_stats, tables_p
     return new_stats, autovac_runtime
 
 
-def _simulate_modify_table(conn, ou, template_ous, metadata):
+def _simulate_modify_table(conn, ou, template_ous, metadata, predictive):
     add_ous = []
     ou_type = OperatingUnit[ou["node_type"]]
     relname = metadata["pg_class_lookup"][ou["ModifyTable_target_oid"]]
@@ -316,9 +327,16 @@ def _simulate_modify_table(conn, ou, template_ous, metadata):
     if ou_type == OperatingUnit.ModifyTableInsert or ou_type == OperatingUnit.ModifyTableUpdate:
         num_insert = 1 if ou_type == OperatingUnit.ModifyTableInsert else 0
         num_update = ou["ModifyTableUpdate_num_updates"] if ou_type == OperatingUnit.ModifyTableUpdate else 0
-        num_new_pages, num_hot, _, _, _ = _guess_relation_mutation(tbl_metadata, num_insert, num_update)
-        assert num_hot <= num_update
-        ou[f"{ou_type.name}_num_extends"] = num_new_pages
+        if predictive:
+            num_new_pages, num_hot, _, _, _ = _guess_relation_mutation(tbl_metadata, num_insert, num_update)
+            assert num_hot <= num_update
+            ou[f"{ou_type.name}_num_extends"] = num_new_pages
+            ou[f"{ou_type.name}_num_hot"] = num_hot
+        else:
+            # In non-predictive mode, assume we don't extend the relation and never HOT.
+            ou[f"{ou_type.name}_num_extends"] = 0
+            ou[f"{ou_type.name}_num_hot"] = 0
+            num_hot = 0
 
         for _ in range(int((num_insert + num_update) - num_hot)):
             for idxoid in ou["ModifyTable_indexupdates_oids"]:
@@ -326,7 +344,8 @@ def _simulate_modify_table(conn, ou, template_ous, metadata):
                 idx_metadata = metadata['pg_class'][idx_name]
                 idx_metadata['sim_inserts'] += 1
 
-                num_splits = _guess_single_split_index(idx_metadata)
+                # Only guess split index if in predictive mode.
+                num_splits = _guess_single_split_index(idx_metadata) if predictive else 0
                 add_ous.append({
                     'node_type': OperatingUnit.ModifyTableIndexInsert.name,
                     'ModifyTableIndexInsert_indexid': idxoid,
@@ -365,7 +384,7 @@ def _simulate_modify_table(conn, ou, template_ous, metadata):
             # Get the OUs for the trigger query plan and compute the derived OUs.
             ous = _evaluate_query_for_plan(conn, query)
             for ou in ous:
-                derived_ous = _compute_derived_ous(conn, ou, ous, metadata)
+                derived_ous = _compute_derived_ous(conn, ou, ous, metadata, predictive)
                 # Wipe out the plan node ID.
                 for ou in derived_ous:
                     ou["plan_node_id"] = -1
@@ -373,16 +392,16 @@ def _simulate_modify_table(conn, ou, template_ous, metadata):
                 add_ous.extend(derived_ous)
         elif ou_type == OperatingUnit.ModifyTableUpdate:
             # Assert that the UPDATE/DELETE is basically a no-op
+            # TODO(wz2): We also assume that all queries will not trigger FK enforcement.
             assert trigger_info['confupdtype'] == 'a'
         else:
             assert ou_type == OperatingUnit.ModifyTableDelete
             assert trigger_info['confdeltype'] == 'a'
 
-    add_ous.append(ou)
     return add_ous
 
 
-def _compute_derived_ous(conn, ou, template_ous, metadata):
+def _compute_derived_ous(conn, ou, template_ous, metadata, predictive):
     # TODO(wz2): Here we compute derived OU features. In reality, we should evaluate whether
     # we need to actually compute these derived OU features OR whether we could just replace
     # actual plan feature estimates with these features during training.
@@ -405,6 +424,7 @@ def _compute_derived_ous(conn, ou, template_ous, metadata):
         prefix = "IndexOnlyScan" if ou_type == OperatingUnit.IndexOnlyScan else "IndexScan"
 
         # IndexOnlyScan/IndexScan need both num_iterator_used and num_outer_loops (for NestLoop).
+        ou[f"{prefix}_num_defrag"] = 0
         ou[f"{prefix}_num_iterator_used"] = get_key("plan_rows", ou)
         ou[f"{prefix}_num_outer_loops"] = 1.0
         for other_ou in template_ous:
@@ -416,7 +436,7 @@ def _compute_derived_ous(conn, ou, template_ous, metadata):
     elif ou_type == OperatingUnit.ModifyTableInsert or ou_type == OperatingUnit.ModifyTableUpdate or ou_type == OperatingUnit.ModifyTableDelete:
         if ou_type == OperatingUnit.ModifyTableUpdate:
             ou["ModifyTableUpdate_num_updates"] = get_key("ModifyTable_input_plan_rows", ou)
-        add_ous.extend(_simulate_modify_table(conn, ou, template_ous, metadata))
+        add_ous.extend(_simulate_modify_table(conn, ou, template_ous, metadata, predictive))
 
     elif ou_type == OperatingUnit.Agg:
         # The number of input rows is the number of rows output by the child.
@@ -429,11 +449,14 @@ def _compute_derived_ous(conn, ou, template_ous, metadata):
         # This does assume that inner probe returns same # tuples given an outer probe.
         ou["NestLoop_num_inner_rows_cumulative"] = get_plan_rows_matching_plan_id(ou["right_child_node_id"]) * ou["NestLoop_num_outer_rows"]
 
+    elif ou_type == OperatingUnit.DestReceiverRemote:
+        ou["DestReceiverRemote_num_output"] = get_key("plan_rows", ou)
+
     add_ous.append(ou)
     return add_ous
 
 
-def generate_query_ous(window_queries, window_metadata, conn, tmp_data_dir):
+def generate_query_ous(window_queries, window_metadata, conn, tmp_data_dir, predictive):
     global QUERY_CACHE
 
     # Accumulator for all the OU features.
@@ -473,9 +496,10 @@ def generate_query_ous(window_queries, window_metadata, conn, tmp_data_dir):
             plan_ous = []
             ous = _evaluate_query_for_plan(conn, query.query_text)
             for ou in ous:
-                plan_ous.extend(_compute_derived_ous(conn, ou, ous, metadata))
+                plan_ous.extend(_compute_derived_ous(conn, ou, ous, metadata, predictive))
 
             # Fill in relevant OU metadata for evaluation/combining later.
+            found_modify = False
             for ou in plan_ous:
                 ou["query_id"] = query.query_id
 
@@ -491,6 +515,9 @@ def generate_query_ous(window_queries, window_metadata, conn, tmp_data_dir):
                 if oukind == OperatingUnit.ModifyTableInsert or oukind == OperatingUnit.ModifyTableUpdate or oukind == OperatingUnit.ModifyTableDelete:
                     # Use the estimate for the number of input tuples as the number we will modify.
                     queries.at[query.Index, "num_modify"] = ou["ModifyTable_input_plan_rows"]
+
+                    assert not found_modify, "There should only be 1 ModifyTableOU"
+                    found_modify = True
 
         # Reset the order index out.
         queries.reset_index(drop=False, inplace=True)

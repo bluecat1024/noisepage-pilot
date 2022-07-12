@@ -31,14 +31,6 @@ set -ex
 # Various steps may require sudo.
 sudo --validate
 
-# Check that the file descriptor limit is at least 8096.
-limit=$(ulimit -n)
-if [ "$limit" -lt 8096 ];
-then
-    echo "TScout requires [ulimit -n] to return at least 8096."
-    exit 1
-fi
-
 help() {
     echo "run_workloads.sh [ARGUMENTS]"
     echo ""
@@ -136,9 +128,9 @@ psql=$(realpath "${PSQL_LOCATION}")
 pg_dump=$(realpath "${PGDUMP_LOCATION}")
 pg_restore=$(realpath "${PGRESTORE_LOCATION}")
 
-# Kill any running postgres and/or TScout instances.
+# Kill any running postgres and/or collector instances.
 pkill -i postgres || true
-pkill -i tscout || true
+pkill -i collector || true
 
 shopt -s nullglob
 
@@ -228,16 +220,6 @@ for workload in "${workload_directory}"/*; do
 
                 # Install QSS extension
                 doit noisepage_qss_install --dbname=benchbase
-                if [ "$enable_tscout" != 'False' ];
-                then
-                    ${psql} --dbname=benchbase --csv --command="ALTER SYSTEM SET qss_capture_exec_stats = ON;"
-                    ${psql} --dbname=benchbase --csv --command="ALTER SYSTEM SET tscout_executor_sampling_rate = 1.0;"
-                    ${pg_ctl} restart -D "${PGDATA_LOCATION}" -m smart
-                else
-                    ${psql} --dbname=benchbase --csv --command="ALTER SYSTEM SET qss_capture_exec_stats = OFF;"
-                    ${psql} --dbname=benchbase --csv --command="ALTER SYSTEM SET tscout_executor_sampling_rate = 0.0;"
-                    ${pg_ctl} restart -D "${PGDATA_LOCATION}" -m smart
-                fi
 
                 # shellcheck disable=2154 # populated by niet
                 if [ "$pg_analyze" != 'False' ];
@@ -275,21 +257,20 @@ for workload in "${workload_directory}"/*; do
                 fi
             fi
 
-            if [ "$enable_tscout" != 'False' ];
+            if [ "$enable_collector" != 'False' ];
             then
-                # Initialize TScout. We currently don't have a means by which to check whether
-                # TScout has successfully attached to the instance. As such, we (wait) 5 seconds.
-                append=$( [[ $i != "0" ]] && echo "True" || echo "False" )
-                doit tscout_init --output_dir="${benchmark_output}" --wait_time=10 --collector_fast_interval=1 --collector_slow_interval=30 --append="${append}"
+                # Initialize collector. We currently don't have a means by which to check whether
+                # collector has successfully attached to the instance. As such, we (wait) 10 seconds.
+                doit collector_init --output_dir="${benchmark_output}" --wait_time=10 --collector_fast_interval=1 --collector_slow_interval=30
             fi
 
             # Execute the benchmark
             doit benchbase_run --benchmark="${benchmark}" --config="${benchbase_config_path}" --args="--execute=true"
 
-            if [ "$enable_tscout" != 'False' ];
+            if [ "$enable_collector" != 'False' ];
             then
-                # Shutdown TScout and take ownership of the results and move into an indexed output directory.
-                doit tscout_shutdown --output_dir="${benchmark_output}" --wait_time=60
+                # Shutdown collector.
+                doit collector_shutdown
             fi
 
             if [ ${i} == $((${#benchbase_configs[@]} - 1)) ];

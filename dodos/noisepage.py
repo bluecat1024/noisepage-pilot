@@ -77,7 +77,6 @@ def task_noisepage_build():
             f"mkdir -p {ARTIFACTS_PATH}",
             f"cp {BUILD_PATH / 'build/bin/*'} {ARTIFACTS_PATH}",
             "sudo apt-get install --yes bpfcc-tools linux-headers-$(uname -r)",
-            f"sudo pip3 install -r {BUILD_PATH / 'cmudb/tscout/requirements.txt'}",
             # Reset working directory.
             lambda: os.chdir(doit.get_initial_workdir()),
         ],
@@ -172,9 +171,8 @@ def task_noisepage_swap_config():
 
 def task_noisepage_qss_install():
     """
-    NoisePage: install qss extension to enable query state collection for a specific database.
+    NoisePage: install qss extension to enable query state collection.
     """
-
     sql_list1 = [
         "ALTER SYSTEM SET allow_system_table_mods = ON",
     ]
@@ -193,27 +191,25 @@ def task_noisepage_qss_install():
             )""",
         """CREATE UNLOGGED TABLE pg_catalog.pg_qss_stats(
             query_id bigint,
-            db_id integer,
-            pid integer,
-            statement_timestamp bigint,
-            plan_node_id int,
-
-            counter0 float8,
-            counter1 float8,
-            counter2 float8,
-            counter3 float8,
-            counter4 float8,
-            counter5 float8,
-            counter6 float8,
-            counter7 float8,
-            counter8 float8,
-            counter9 float8,
-            params text
+	    db_id integer,
+	    pid integer,
+	    statement_timestamp bigint,
+	    plan_node_id int,
+            elapsed_us float8,
+	    counter0 float8,
+	    counter1 float8,
+	    counter2 float8,
+	    counter3 float8,
+	    counter4 float8,
+	    counter5 float8,
+	    counter6 float8,
+	    counter7 float8,
+	    counter8 float8,
+	    counter9 float8,
+            payload bigint,
+            comment text
             )""",
         "ALTER SYSTEM SET shared_preload_libraries='qss'",
-        "ALTER SYSTEM SET qss_capture_enabled = ON",
-        "ALTER SYSTEM SET qss_capture_exec_stats = ON",
-        "ALTER SYSTEM SET qss_capture_query_runtime = ON",
         "DROP EXTENSION IF EXISTS qss",
         "CREATE EXTENSION qss",
     ]

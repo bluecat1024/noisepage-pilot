@@ -13,7 +13,7 @@ from plumbum import cli
 from tqdm import tqdm
 
 from behavior import OperatingUnit, TARGET_COLUMNS, DERIVED_FEATURES_MAP
-from behavior.plans import PLAN_INDEPENDENT_ID, QSS_STATS_OUS, UNIQUE_QUERY_ID_INDEX, QSS_PLANS_IGNORE_NODE_FEATURES, QSS_MERGE_PLAN_KEY
+from behavior.plans import PLAN_INDEPENDENT_ID, UNIQUE_QUERY_ID_INDEX, QSS_PLANS_IGNORE_NODE_FEATURES, QSS_MERGE_PLAN_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -70,8 +70,41 @@ def prepare_qss_plans(plans_df):
             new_df_tuples.append(new_tuple)
 
         # For a given query, featurize each node in the plan tree.
-        tscout_dict = feature[0]
-        process_plan(tscout_dict)
+        np_dict = feature[0]
+
+        QUERY_SUBSTR_BLOCK = [
+            "epoch from NOW()",
+            "pg_prewarm",
+            "version()",
+            "current_schema()",
+            "pg_settings",
+            # The following are used to block JDBC.
+            "pg_catalog.generate_series",
+            "n.nspname = 'information_schema'",
+            "pg_catalog.pg_namespace",
+            # The following are used to block Benchbase.
+            "pg_statio_user_indexes",
+            "pg_stat_user_indexes",
+            "pg_statio_user_tables",
+            "pg_stat_user_tables",
+            "pg_stat_database_conflicts",
+            "pg_stat_database",
+            "pg_stat_bgwriter",
+            "pg_stat_archiver",
+            "Pg_stat_archiver",
+        ]
+
+        skip = False
+        query_text = np_dict["query_text"]
+        for sub in QUERY_SUBSTR_BLOCK:
+            if sub in query_text:
+                # Block if the substring can be found.
+                # This will then block all corresponding OUs.
+                skip = True
+                break
+
+        if not skip:
+            process_plan(np_dict)
 
     plans_df = pd.DataFrame(new_df_tuples)
     plans_df.set_index(keys=["statement_timestamp"], drop=True, append=False, inplace=True)
@@ -101,7 +134,9 @@ def merge_ou_with_features(ou_df, plans_df, new_plan_features):
 
     # Drop all rows that fail to find a corresponding match.
     ou_df.drop(ou_df[ou_df.plan_feature_idx.isna()].index, inplace=True)
-    assert ou_df.shape[0] > 0, "Most likely, you are missing some plan data."
+    if ou_df.shape[0] == 0:
+        return ou_df
+
     ou_df.reset_index(drop=False, inplace=True)
     ou_df["id"] = ou_df.index
 
@@ -123,27 +158,6 @@ def merge_ou_with_features(ou_df, plans_df, new_plan_features):
     return ou_df
 
 
-def transform_ou_df(node_name, ou_df):
-    """
-    Given the current OU dictated by [node_name], perform the correct transformation to ou_df.
-    This function drops and/or renames columns as needed based on the OU.
-
-    This is mainly for readability and understandability later in the pipeline but can also
-    be a point to perform certain transformations.
-    """
-    derived_map = {}
-    for k, v in DERIVED_FEATURES_MAP.items():
-        if k.startswith(node_name):
-            derived_map[v] = k
-
-    if len(derived_map) > 0:
-        ou_df.rename(columns=derived_map, inplace=True, errors='raise')
-
-    features_drop = [f"counter{i}" for i in range(10)] + ["payload"]
-    ou_df.drop(columns=features_drop, inplace=True, errors='ignore')
-    return ou_df
-
-
 def main(data_dir, output_dir, experiment, output_ous) -> None:
     logger.info("Extracting query state store features for experiment: %s", experiment)
     experiment_root: Path = data_dir / experiment
@@ -151,65 +165,47 @@ def main(data_dir, output_dir, experiment, output_ous) -> None:
     for bench_name in bench_names:
         logger.info("Benchmark: %s", bench_name)
         bench_root = experiment_root / bench_name
+        ous_dir = bench_root / "ous"
         pg_qss_plans = bench_root / "pg_qss_plans.csv"
-        pg_qss_stats = bench_root / "pg_qss_stats.csv"
-        tscout_data_dir = bench_root / "tscout"
-        if not tscout_data_dir.exists():
+        assert pg_qss_plans.exists()
+        if not ous_dir.exists():
             logger.info("Skipping %s", bench_name)
             continue
 
-        assert pg_qss_stats.exists() and pg_qss_plans.exists()
-
         # Process the query state store plans.
         plans_df, plan_features = prepare_qss_plans(pd.read_csv(pg_qss_plans))
-
-        # Load in the query state store execution counters.
-        qss_stats = pd.read_csv(pg_qss_stats)
-        qss_stats.drop(labels=["params"], axis=1, inplace=True)
-        assert qss_stats.shape[0] > 0
-        qss_stats.set_index(keys=QSS_MERGE_PLAN_KEY, drop=True, append=False, inplace=True)
 
         extract_data_dir: Path = output_dir / experiment / bench_name
         if extract_data_dir.exists():
             shutil.rmtree(extract_data_dir)
         extract_data_dir.mkdir(parents=True, exist_ok=True)
 
-        csv_files = tscout_data_dir.glob("*.csv")
-        csv_files = set([f for f in csv_files])
-        exec_ous = set([tscout_data_dir / f"Exec{node_name.name}.csv" for node_name in OperatingUnit])
-        for csv_file in (csv_files - exec_ous):
+        for csv_file in bench_root.glob("*.csv"):
+            if csv_file.stem == "pg_qss_stats":
+                continue
             # These are non-execution OU data. These files are copied out
             # for something downstream to consume.
             shutil.copy(csv_file, extract_data_dir / f"{csv_file.stem}.csv")
-        shutil.copy(pg_qss_plans, extract_data_dir / "pg_qss_plans.csv")
 
         # This computes the actual OUs that we need to process and output.
         output_ous = set([node_name.name for node_name in OperatingUnit]).intersection(set(output_ous))
-        exec_ous = sorted([(node_name, tscout_data_dir / f"Exec{node_name}.csv") for node_name in output_ous], key=lambda x: x[0])
+        exec_ous = sorted([(node_name, ous_dir / f"Exec{node_name}.feather") for node_name in output_ous], key=lambda x: x[0])
         for node_name, ou in exec_ous:
             if not ou.exists():
                 # If the OU data does not exist, then it is a no-op.
                 continue
 
             logger.info("Processing %s", ou)
-            ou_df = pd.read_csv(ou)
+            ou_df = pd.read_feather(ou)
             if ou_df.shape[0] == 0:
                 # If the OU has no data, then it is a no-op.
                 continue
 
             # Combine the node feature data with the actual plan node execution.
             ou_df = merge_ou_with_features(ou_df, plans_df, plan_features)
-
-            if OperatingUnit[node_name] in QSS_STATS_OUS:
-                # Combine the plan node's execution counters only if necessary.
-                ou_df.set_index(keys=QSS_MERGE_PLAN_KEY, drop=True, append=False, inplace=True)
-                ou_df = ou_df.join(qss_stats, on=QSS_MERGE_PLAN_KEY, how="inner")
-                assert ou_df.index.is_unique
-                assert ou_df.shape[0] <= qss_stats.shape[0]
-                ou_df.reset_index(drop=False, inplace=True)
-
-            # Transform ou_df based on the particular OU.
-            ou_df = transform_ou_df(node_name, ou_df)
+            if ou_df.shape[0] == 0:
+                logger.info("%s does not have any valid plan data.", ou)
+                continue
 
             # Reset index before writing to feather file.
             ou_df.reset_index(drop=True, inplace=True)

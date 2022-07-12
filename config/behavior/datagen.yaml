@@ -27,8 +27,14 @@ datagen:
     dump_db: False
     # Location to dump the database to if we're dumping the database.
     dump_db_path: null
-    # Whether to enable TScout and extended statistics collection.
-    enable_tscout: True
+    # Whether to enable the userspace collector.
+    enable_collector: True
+    # Default options that will (default) apply to all runs. Can be overriden.
+    default_options:
+      - qss_capture_enabled = ON
+      - qss_capture_nested = ON
+      - qss_capture_exec_stats = ON
+      - qss_output_noisepage = ON
 
     runs:
       # Options that describe each run. These arrays must have the same length.

@@ -64,8 +64,16 @@ def generate_workload(config, mode_dir, benchbase_path, postgresql_config_file):
         shutil.copy(postgresql_config_file, benchbase_postgresql_config_file)
         if "options" in run and run["options"] is not None and len(run["options"]) > 0:
             with open(benchbase_postgresql_config_file, "a") as f:
+                valid_option = []
                 for option in run["options"]:
+                    valid_option.append(option.split("=")[0])
                     f.write(f"{option}\n")
+
+                if "default_options" in config and config["default_options"] is not None:
+                    for option in config["default_options"]:
+                        option_key = option.split("=")[0]
+                        if option_key not in valid_option:
+                            f.write(f"{option}\n")
         pg_configs.append(str(benchbase_postgresql_config_file.resolve()))
         if "post_execute_sql" in run and run["post_execute_sql"] is not None:
             post_execute.append(run["post_execute_sql"])
@@ -81,7 +89,7 @@ def generate_workload(config, mode_dir, benchbase_path, postgresql_config_file):
         "pg_configs": pg_configs,
         "benchbase_configs": benchbase_configs,
         "dump_db": config["dump_db"],
-        "enable_tscout": config["enable_tscout"],
+        "enable_collector": config["enable_collector"],
     }
 
     if "dump_db_path" in config and config["dump_db_path"] is not None:

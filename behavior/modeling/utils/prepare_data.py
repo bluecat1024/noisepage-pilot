@@ -41,11 +41,11 @@ def purify_index_input_data(df):
         "indkey_attlen_",
         "indkey_atttypmod_",
         "indkey_attvarying_",
-        "indkey_n_distinct_",
         "indkey_avg_width_",
 
         # TODO(wz2): Null Fraction is dropped since there's no good way of representing this.
         # Models probably also don't need this. Similar reasoning for correlation.
+        "indkey_n_distinct_",
         "indkey_null_frac_",
         "indkey_correlation_",
     ]
@@ -119,16 +119,6 @@ def clean_input_data(df, settings, stats, is_train):
     # Drop all these additional metadata or useless target columns
     blocked.extend([
         "unix_timestamp",
-        "cpu_cycles",
-        "instructions",
-        "cache_references",
-        "cache_misses",
-        "ref_cpu_cycles",
-        "network_bytes_read",
-        "network_bytes_written",
-        "disk_bytes_read",
-        "disk_bytes_written",
-        "memory_bytes",
         "time",
 
         "relname",
@@ -197,6 +187,9 @@ def clean_input_data(df, settings, stats, is_train):
 
     # Sort the DataFrame by column for uniform downstream outputs.
     df.sort_index(axis=1, inplace=True)
+
+    # Featurewiz expects the TARGET_COLUMNS to be at the end for some reason.
+    df = df[[c for c in df if c not in TARGET_COLUMNS] + [t for t in TARGET_COLUMNS if t in df]]
     return df
 
 
@@ -230,9 +223,8 @@ def prepare_inference_query_stream(dir_data):
     pg_qss_stats = pd.read_csv(dir_data / "pg_qss_stats.csv")
     assert pg_qss_stats.shape[0] > 0
     query_stats = pg_qss_stats[pg_qss_stats.plan_node_id == -1]
-    query_stats.rename(columns={"counter0": "total_elapsed_us"}, inplace=True)
-    query_stats.drop(columns=[f"counter{i}" for i in range(1, 10)] + ["plan_node_id"], inplace=True, errors='raise')
-    query_stats["params"] = query_stats.params.fillna('')
+    query_stats.drop(columns=[f"counter{i}" for i in range(0, 10)] + ["plan_node_id"], inplace=True, errors='raise')
+    query_stats["params"] = query_stats.comment.fillna('')
     del pg_qss_stats
     gc.collect()
 

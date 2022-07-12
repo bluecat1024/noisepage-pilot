@@ -8,7 +8,7 @@ from dodos.ci import *
 from dodos.forecast import *
 from dodos.noisepage import *
 from dodos.pilot import *
-from dodos.tscout import *
+from dodos.collector import *
 
 DOIT_CONFIG = {
     'backend': "sqlite3"

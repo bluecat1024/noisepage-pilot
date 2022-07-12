@@ -26,98 +26,7 @@ def process_time_pg_settings(time_pg_settings):
     return time_pg_settings
 
 
-def process_time_pg_trigger(time_pg_trigger):
-    PG_TRIGGER_SCHEMA = [
-        "oid",
-        "tgrelid",
-        #"tgparentid",
-        "tgname",
-        "tgfoid",
-        "tgtype",
-        "tgenabled",
-        #"tgisinternal",
-        "tgconstrrelid",
-        "tgconstrindid",
-        "tgconstraint",
-        "tgdeferrable",
-        #"tginitdeferred",
-        #"tgnargs",
-        #"tgattr",
-        #"tgargs",
-        #"tgqual",
-        #"tgoldtable",
-        #"tgnewtable",
-    ]
-
-    cols_remove = [col for col in time_pg_trigger.columns if col not in PG_TRIGGER_SCHEMA]
-    time_pg_trigger["unix_timestamp"] = time_pg_trigger.time.astype(float) / 1e6
-    time_pg_trigger.drop(labels=cols_remove, axis=1, inplace=True, errors='ignore')
-    time_pg_trigger.rename(columns={"oid":"pg_trigger_oid"}, inplace=True)
-    return time_pg_trigger
-
-
-def process_time_pg_constraint(time_pg_constraint):
-    PG_CONSTRAINT_SCHEMA = [
-        "oid",
-        "connname",
-        #"connnamespace",
-        "contype",
-        "condeferrable",
-        "condeferred",
-        #"convalidated",
-        "conrelid",
-        "contypid",
-        "conindid",
-        #"conparentid",
-        "confrelid",
-        "confupdtype",
-        "confdeltype",
-        #"confmatchtype",
-        #"conislocal",
-        #"coninhcount",
-        #"connoinherit",
-        "conkey",
-        "confkey",
-        "conpfeqop",
-        "conppeqop",
-        "conffeqop",
-        "conexclop",
-        #"conbin",
-    ]
-
-    cols_remove = [col for col in time_pg_constraint.columns if col not in PG_CONSTRAINT_SCHEMA]
-    time_pg_constraint['unix_timestamp'] = time_pg_constraint.time.astype(float) / 1e6
-    time_pg_constraint.drop(labels=cols_remove, axis=1, inplace=True, errors='ignore')
-    time_pg_constraint.rename(columns={"oid":"pg_constraint_oid"}, inplace=True)
-    return time_pg_constraint
-
-
-def build_time_trigger_metadata(time_pg_trigger, time_pg_constraint):
-    time_pg_trigger.set_index(keys=["unix_timestamp"], drop=True, append=False, inplace=True)
-    time_pg_trigger.sort_index(axis=0, inplace=True)
-    if len(time_pg_trigger) == 0:
-        # Just return an empty dataframe I guess.
-        return time_pg_trigger
-
-    time_pg_constraint.set_index(keys=["unix_timestamp"], drop=True, append=False, inplace=True)
-    time_pg_constraint.sort_index(axis=0, inplace=True)
-
-    data = pd.merge_asof(time_pg_trigger, time_pg_constraint, left_by=["tgconstraint"], right_by=["pg_constraint_oid"], left_index=True, right_index=True, allow_exact_matches=True)
-    data.drop(data[data.pg_constraint_oid.isna()].index, inplace=True)
-    data.drop(labels=["pg_constraint_oid", "tgconstraint"], axis=1, inplace=True)
-    data["pg_trigger_oid"] = data.pg_trigger_oid.astype(np.int64)
-    data.reset_index(drop=False, inplace=True)
-
-    data.set_index(keys=["unix_timestamp"], drop=True, append=False, inplace=True)
-    data.sort_index(axis=0, inplace=True)
-    return data
-
-
 def construct_all_time_metadatas(root):
-    time_pg_trigger = process_time_pg_trigger(pd.read_csv(root / "pg_trigger.csv"))
-    time_pg_constraint = process_time_pg_constraint(pd.read_csv(root / "pg_constraint.csv"))
-    time_trigger_metadata = build_time_trigger_metadata(time_pg_trigger, time_pg_constraint)
-
     time_pg_attribute = process_time_pg_attribute(pd.read_csv(root / "pg_attribute.csv"))
     time_pg_index = process_time_pg_index(pd.read_csv(root / "pg_index.csv"))
     time_tables, time_cls_indexes = process_time_pg_class(pd.read_csv(root / "pg_class.csv"))
@@ -135,7 +44,7 @@ def construct_all_time_metadatas(root):
     time_pg_settings = process_time_pg_settings(pd.read_csv(root / "pg_settings.csv"))
     time_pg_settings.set_index(keys=["unix_timestamp"], drop=True, append=False, inplace=True)
     time_pg_settings.sort_index(axis=0, inplace=True)
-    return time_index_metadata, time_pg_settings, time_pg_stats, time_trigger_metadata
+    return time_index_metadata, time_pg_settings, time_pg_stats
 
 
 def merge_time_settings(data, settings):
@@ -229,21 +138,6 @@ class StateMergeCLI(cli.Application):
         return merge_modifytable_data(name=name, root=root)
 
 
-    def process_aqt(self, root, time_trigger_metadata):
-        logger.info("Processing AfterQueryTrigger")
-        data = pd.read_feather(root / "AfterQueryTrigger.feather")
-        data["data_identifier"] = data.index + 1
-        data["unix_timestamp"] = postgres_julian_to_unix(data.statement_timestamp)
-        data.set_index(keys=["unix_timestamp"], drop=True, append=False, inplace=True)
-        data.sort_index(axis=0, inplace=True)
-
-        time_data = pd.merge_asof(data, time_trigger_metadata, left_index=True, right_index=True, left_by=["AfterQueryTrigger_tgoid"], right_by=["pg_trigger_oid"], allow_exact_matches=True)
-        time_data.drop(time_data[time_data.pg_trigger_oid.isna()].index, inplace=True)
-        time_data.drop(labels=["AfterQueryTrigger_tgoid"], axis=1, inplace=True)
-        time_data.reset_index(drop=False, inplace=True)
-        return time_data
-
-
     def main(self):
         pd.options.display.width = 0
         pd.set_option('display.float_format', lambda x: '%.3f' % x)
@@ -264,7 +158,7 @@ class StateMergeCLI(cli.Application):
                 merge_data_dir.mkdir(parents=True, exist_ok=True)
 
                 # Process all the index metadata upfront here.
-                time_index_metadata, time_pg_settings, time_pg_stats, time_trigger_metadata = construct_all_time_metadatas(experiment_root / bench_name)
+                time_index_metadata, time_pg_settings, time_pg_stats = construct_all_time_metadatas(experiment_root / bench_name)
 
                 # Start processing all the OUs.
                 for f in Path(benchmark_path).glob("*.feather"):
@@ -300,11 +194,6 @@ class StateMergeCLI(cli.Application):
                             logger.info("Splitting %s into %s", f.stem, group[0])
                             out = f"{merge_data_dir}/{f.stem}_{group[0]}.feather"
                             group[1].reset_index(drop=True).to_feather(out)
-                    elif ou == OperatingUnit.AfterQueryTrigger:
-                        data = self.process_aqt(experiment_root / bench_name, time_trigger_metadata)
-                        logger.info("Writing out %s data", f.stem)
-                        data.reset_index(drop=True, inplace=True)
-                        data.to_feather(f"{merge_data_dir}/{f.stem}.feather")
                     else:
                         # Generically process
                         # Copy the file straight to the output directory.
@@ -323,12 +212,10 @@ class StateMergeCLI(cli.Application):
                 time_index_metadata.reset_index(drop=True, inplace=True)
                 time_pg_settings.reset_index(drop=True, inplace=True)
                 time_pg_stats.reset_index(drop=True, inplace=True)
-                time_trigger_metadata.reset_index(drop=True, inplace=True)
 
                 time_index_metadata.to_feather(f"{merge_data_dir}/idx_index_metadata.feather")
                 time_pg_settings.to_feather(f"{merge_data_dir}/idx_pg_settings.feather")
                 time_pg_stats.to_feather(f"{merge_data_dir}/idx_pg_stats.feather")
-                time_trigger_metadata.to_feather(f"{merge_data_dir}/idx_trigger_metadata.feather")
 
 if __name__ == "__main__":
     StateMergeCLI.run()

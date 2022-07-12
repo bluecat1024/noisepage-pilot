@@ -16,7 +16,7 @@ from plumbum import cli
 from sklearn import tree
 
 from behavior import TARGET_COLUMNS, OperatingUnit, Targets, DERIVED_FEATURES_MAP
-from behavior.modeling import featurize, BLOCKED_OUS
+from behavior.modeling import featurize
 from behavior.modeling.utils.prepare_data import load_input_data
 from behavior.modeling.utils.evaluate_ou import evaluate_ou_model
 from behavior.modeling.model import BehaviorModel
@@ -54,10 +54,6 @@ def load_data(train_files):
     result_paths = [fp for fp in train_files if os.stat(fp).st_size > 0]
     ou_name_to_df: dict[str, DataFrame] = {}
     for ou in OperatingUnit:
-        if ou in BLOCKED_OUS:
-            # Skip the OU if it is blocked from training.
-            continue
-
         ou_name = ou.name
         ou_results = [fp for fp in result_paths if fp.name.startswith(ou_name)]
         if len(ou_results) > 0:

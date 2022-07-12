@@ -112,19 +112,34 @@ def augment_ous(scratch_it, sliced_metadata, conn):
     open(scratch_it / "augment_query_ous", "w").close()
 
 
-def evaluate_query_plans(split_query_stream, plan_features, base_models, output_path):
+def evaluate_query_plans(split_query_stream, base_models, scratch_it, output_path):
     # Evaluate all the OUs.
-    eval_df_features = []
-    for ou_type in plan_features:
-        assert OperatingUnit[ou_type] != OperatingUnit.AfterQueryTrigger
+    for ou in OperatingUnit:
+        ou_type = ou.name
+        files = sorted(glob.glob(f"{scratch_it}/AUG_{ou.name}.feather.*"))
+        def logged_read_feather(target):
+            logger.info("[^]: [LOAD] Input %s", target)
+            return pd.read_feather(target)
+
+        if len(files) > 0:
+            df = pd.concat(map(logged_read_feather, files))
+            df.reset_index(drop=True, inplace=True)
+        else:
+            files = sorted(glob.glob(f"{scratch_it}/{ou.name}.feather.*"))
+            if len(files) > 0:
+                df = pd.concat(map(logged_read_feather, files))
+                df.reset_index(drop=True, inplace=True)
+            else:
+                # This OU has no data.
+                continue
+
         if ou_type not in base_models:
             # If we don't have the model for the particular OU, we just predict 0.
-            df = plan_features[ou_type]
             df["pred_elapsed_us"] = 0
             # Set a bit in [error_missing_model]
             df["error_missing_model"] = 1
         else:
-            df = evaluate_ou_model(base_models[ou_type], None, None, eval_df=plan_features[ou_type], return_df=True, output=False)
+            df = evaluate_ou_model(base_models[ou_type], None, None, eval_df=df, return_df=True, output=False)
             df["error_missing_model"] = 0
 
         if OperatingUnit[ou_type] == OperatingUnit.IndexOnlyScan or OperatingUnit[ou_type] == OperatingUnit.IndexScan:
@@ -132,19 +147,25 @@ def evaluate_query_plans(split_query_stream, plan_features, base_models, output_
             prefix = "IndexOnlyScan" if OperatingUnit[ou_type] == OperatingUnit.IndexOnlyScan else "IndexScan"
             df["pred_elapsed_us"] = df.pred_elapsed_us * df[f"{prefix}_num_outer_loops"]
 
-        if output_path is not None:
-            df.to_feather(output_path / f"{ou_type}_evals.feather")
+        df.to_feather(output_path / f"{ou_type}_evals.feather")
 
-        keep_columns = ["query_id", "order", "plan_node_id", "pred_elapsed_us", "error_missing_model"]
-        df.drop(columns=[col for col in df.columns if col not in keep_columns], inplace=True)
-        eval_df_features.append(df)
+    # Massage the frames together from disk to combat OOM.
+    unified_df = None
+    for ou in OperatingUnit:
+        ou_type = ou.name
+        if (output_path / f"{ou_type}_evals.feather").exists():
+            logger.info("Reading %s", ou_type)
+            df = pd.read_feather(output_path / f"{ou_type}_evals.feather")
+            keep_columns = ["query_id", "order", "pred_elapsed_us", "error_missing_model"]
+            df.drop(columns=[col for col in df.columns if col not in keep_columns], inplace=True)
+            if unified_df is None:
+                unified_df = df
+            else:
+                unified_df = pd.concat([unified_df, df], ignore_index=True).groupby(["query_id", "order"]).sum()
+                unified_df.reset_index(drop=False, inplace=True)
+            gc.collect()
 
-    # Massage the frames together.
-    unified_df = pd.concat(eval_df_features, ignore_index=True)
-    unified_df.drop(columns=["plan_node_id"], inplace=True)
-    unified_df = unified_df.groupby(["query_id", "order"]).sum()
-
-    unified_df.reset_index(drop=False, inplace=True)
+    assert unified_df is not None
     unified_df.drop(columns=["query_id"], inplace=True)
     unified_df.set_index(keys=["order"], drop=True, append=False, inplace=True)
 
@@ -186,7 +207,12 @@ def _slice_queries(query_stream, conn, scratch_it, iteration_count):
     return sliced_query_stream, sliced_metadata
 
 
-def main(num_iterations, psycopg2_conn, session_sql, dir_models, dir_data, dir_evals_output, dir_scratch):
+def main(num_iterations, psycopg2_conn, session_sql, dir_models, dir_data, dir_evals_output, dir_scratch, predictive):
+    logger.info("Executing in predictive mode: %s", predictive)
+    if not predictive:
+        # Only run for 1 iteration if not in predictive mode.
+        num_iterations = 1
+
     # Load the models
     base_models = load_models(dir_models)
 
@@ -212,6 +238,7 @@ def main(num_iterations, psycopg2_conn, session_sql, dir_models, dir_data, dir_e
                 # Already finished this iteration so move to the next one.
                 if "query_stream" in locals():
                     del query_stream
+                    gc.collect()
 
                 query_stream = pd.read_feather(scratch_it / "final_query.feather")
                 iteration_count = iteration_count + 1
@@ -222,12 +249,14 @@ def main(num_iterations, psycopg2_conn, session_sql, dir_models, dir_data, dir_e
 
             logger.info("[%s, %s]: Slicing query stream based on vacuum", iteration_count, datetime.now())
             sliced_query_stream, sliced_metadata = _slice_queries(query_stream, conn, scratch_it, iteration_count)
-            logger.info("[%s, %s]: Produced [%s] query streams based on vacuum analysis", iteration_count, datetime.now(), len(sliced_query_stream))
             del query_stream
+            gc.collect()
+            logger.info("[%s, %s]: Produced [%s] query streams based on vacuum analysis", iteration_count, datetime.now(), len(sliced_query_stream))
 
             logger.info("[%s, %s]: Generate query operating units", iteration_count, datetime.now())
             if not (scratch_it / "generate_query_ous").exists():
-                generate_query_ous(sliced_query_stream, sliced_metadata, conn, scratch_it)
+                generate_query_ous(sliced_query_stream, sliced_metadata, conn, scratch_it, predictive)
+            gc.collect()
 
             logger.info("[%s, %s]: Augmenting query operating units", iteration_count, datetime.now())
             if not (scratch_it / "augment_query_ous").exists():
@@ -235,36 +264,16 @@ def main(num_iterations, psycopg2_conn, session_sql, dir_models, dir_data, dir_e
 
             # No longer need sliced_metadata after this point.
             del sliced_metadata
+            gc.collect()
 
             target_output = base_output / f"preds_{iteration_count}"
             target_output.mkdir(parents=True, exist_ok=True)
 
-            # Load all the OU data.
-            logger.info("[%s, %s]: Loading all query data", iteration_count, datetime.now())
-            ous = {}
-            for ou in OperatingUnit:
-                files = sorted(glob.glob(f"{scratch_it}/AUG_{ou.name}.feather.*"))
-                def logged_read_feather(target):
-                    logger.info("[%s]: [LOAD] Input %s", iteration_count, target)
-                    return pd.read_feather(target)
-
-                if len(files) > 0:
-                    df = pd.concat(map(logged_read_feather, files))
-                    df.reset_index(drop=True, inplace=True)
-                    ous[ou.name] = df
-                    continue
-
-                files = sorted(glob.glob(f"{scratch_it}/{ou.name}.feather.*"))
-                if len(files) > 0:
-                    df = pd.concat(map(logged_read_feather, files))
-                    df.reset_index(drop=True, inplace=True)
-                    ous[ou.name] = df
-
             # Evaluate query plans and relase resources.
             logger.info("[%s, %s]: Evaluating query plans", iteration_count, datetime.now())
-            query_stream = evaluate_query_plans(sliced_query_stream, ous, base_models, target_output)
+            query_stream = evaluate_query_plans(sliced_query_stream, base_models, scratch_it, target_output)
             del sliced_query_stream
-            del ous
+            gc.collect()
 
             # Generate prediction plots.
             query_stream.to_feather(target_output / "query_results.feather")
@@ -319,6 +328,11 @@ class EvalQueryCLI(cli.Application):
         mandatory=False,
         help="Number of iterations to attempt to converge predictions.",
     )
+    predictive = cli.SwitchAttr(
+        "--predictive",
+        mandatory=False,
+        help="Whether to enable predictive mode or not.",
+    )
 
     def main(self):
         main(self.num_iterations,
@@ -327,7 +341,8 @@ class EvalQueryCLI(cli.Application):
              self.dir_models,
              self.dir_data,
              self.dir_evals_output,
-             self.dir_scratch)
+             self.dir_scratch,
+             self.predictive == "True")
 
 
 if __name__ == "__main__":

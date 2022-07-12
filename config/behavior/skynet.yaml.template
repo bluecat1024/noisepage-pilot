@@ -1,0 +1,34 @@
+# "Skynet" - Configuration to generate an entire modeling pipeline.
+skynet:
+  workload_generate: False
+  workload_execute: False
+  workload_process: False
+
+  # List of models to train in format [experiment/<data_path>, models/<output_name>/, use_featurewiz].
+  train_models:
+    - [tpcc_sf1, "tpcc_sf1", False]
+
+  # evals_ou in format [experiment/<data_path>, models/<model_name>/, evals_ou/<output_name>/].
+  evals_ou:
+    - [tpcc_sf1, "tpcc_sf1", "tpcc_sf1_evals"]
+
+  eval_query:
+    - benchmark: tpcc
+      user: wz2
+      restore_db_path: ~/pg_dumps/tpcc_sf1.dir
+      pg_conf_path: config/postgres/default_postgresql.conf
+      num_iterations: [1]
+      predictive: [True]
+      session_path: [session.sql]
+      model_subdir: ["tpcc_sf1/gbm_l2/"]
+      raw_data: ["tpcc_sf1"]
+      output_paths: ["tpcc_sf1_query_evals"]
+
+  eval_query_plots: True
+
+  output_path: /home/wz2/evaluation_0/
+  zip_data: False
+  zip_models: False
+  zip_evals_ou: False
+  zip_eval_query: False
+  zip_eval_query_plots: False

@@ -30,3 +30,5 @@ dist/
 *.egg
 
 *.so
+run.sh
+config/behavior/skynet.yaml

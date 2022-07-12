@@ -90,7 +90,6 @@ BENCHDB_TO_TABLES = {
 
 
 # This list must be kept up to date with the OU definitions in cmu-db/postgres.
-# OU_DEFS is defined in: https://github.com/cmu-db/postgres/blob/pg14/cmudb/tscout/model.py
 class OperatingUnit(Enum):
     Agg = 0
     Append = 1
@@ -120,39 +119,28 @@ class OperatingUnit(Enum):
     ModifyTableUpdate = 25
     ModifyTableDelete = 26
     ModifyTableIndexInsert = 27
-    AfterQueryTrigger = 28
-    NamedTuplestoreScan = 29
-    NestLoop = 30
-    ProjectSet = 31
-    RecursiveUnion = 32
-    Result = 33
-    SampleScan = 34
-    SeqScan = 35
-    SetOp = 36
-    Sort = 37
-    SubPlan = 38
-    SubqueryScan = 39
-    TableFuncScan = 40
-    TidScan = 41
-    TidRangeScan = 42
-    Unique = 43
-    ValuesScan = 44
-    WindowAgg =  45
-    WorkTableScan = 46
-    DestReceiverRemote = 47
+    NamedTuplestoreScan = 28
+    NestLoop = 29
+    ProjectSet = 30
+    RecursiveUnion = 31
+    Result = 32
+    SampleScan = 33
+    SeqScan = 34
+    SetOp = 35
+    Sort = 36
+    SubPlan = 37
+    SubqueryScan = 38
+    TableFuncScan = 39
+    TidScan = 40
+    TidRangeScan = 41
+    Unique = 42
+    ValuesScan = 43
+    WindowAgg =  44
+    WorkTableScan = 45
+    DestReceiverRemote = 46
 
 
 class Targets(Enum):
-    CPU_CYCLES = "cpu_cycles"
-    INSTRUCTIONS = "instructions"
-    CACHE_REFERENCES = "cache_references"
-    CACHE_MISSES = "cache_misses"
-    REF_CPU_CYLES = "ref_cpu_cycles"
-    NETWORK_BYTES_READ = "network_bytes_read"
-    NETWORK_BYTES_WRITTEN = "network_bytes_written"
-    DISK_BYTES_READ = "disk_bytes_read"
-    DISK_BYTES_WRITTEN = "disk_bytes_written"
-    MEMORY_BYTES = "memory_bytes"
     ELAPSED_US = "elapsed_us"
 
 
@@ -165,11 +153,13 @@ A dictionary of derived features. The name is the name of the derived feature th
 column in pg_qss_stats that should be remapped.
 """
 DERIVED_FEATURES_MAP = {
+    "DestReceiverRemote_num_output": "counter0",
     "IndexOnlyScan_num_iterator_used": "counter0",
     "IndexOnlyScan_num_heap_fetches": "counter1",
     "IndexScan_num_iterator_used": "counter0",
     "IndexScan_num_heap_fetches": "counter1",
     "IndexScan_num_outer_loops": "counter2",
+    "IndexScan_num_defrag": "counter3",
     "ModifyTableInsert_num_br_ir_as_triggers_fired": "counter0",
     "ModifyTableInsert_num_spec_insert": "counter1",
     "ModifyTableInsert_num_tuple_toast": "counter2",
@@ -208,17 +198,6 @@ DERIVED_FEATURES_MAP = {
     "Agg_num_input_rows": "counter0",
     "NestLoop_num_outer_rows": "counter0",
     "NestLoop_num_inner_rows_cumulative": "counter1",
-    "AfterQueryTrigger_tgoid": "payload",
-    "AfterQueryTrigger_plan_gen": "counter0",
-    "AfterQueryTrigger_setup_teardown_us": "counter1",
-    "AfterQueryTrigger_num_oneshot_plans": "counter2",
-    "AfterQueryTrigger_num_plans": "counter3",
-    "AfterQueryTrigger_acquire_plan_us": "counter4",
-    "AfterQueryTrigger_executor_start_us": "counter5",
-    "AfterQueryTrigger_executor_run_us": "counter6",
-    "AfterQueryTrigger_num_check_tuples": "counter7",
-    "AfterQueryTrigger_executor_finish_us": "counter8",
-    "AfterQueryTrigger_executor_end_us": "counter9",
     "BitmapIndexScan_num_tids_found": "counter0",
     "BitmapHeapScan_num_blocks_fetch": "counter0",
     "BitmapHeapScan_num_empty_tuples": "counter1",

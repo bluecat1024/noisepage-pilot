@@ -74,6 +74,9 @@ def derive_input_features(train, feature_engg="interactions", ignore=[], test=No
 
     if test_input is None:
         # If no test_input, then it returns directly columns.
+        if len(features) == 0:
+            return ["bias"]
+
         return features
 
     if len(features.columns) - len(targets) == 0:
@@ -109,7 +112,7 @@ def extract_all_features(df, ignore):
 
 def extract_input_features(df, metadata):
     """
-    Given a base dataframe (e.g., of the form extracted by TScout/Hutch),
+    Given a base dataframe (e.g., of the form extracted from postgres),
     and the metadata returned by derive_input_features(), this function
     extracts/reconstructs the input features for the model.
 

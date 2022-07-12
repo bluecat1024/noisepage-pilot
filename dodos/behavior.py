@@ -21,6 +21,7 @@ BUILD_PATH = default_build_path()
 # Input: various configuration files.
 DATAGEN_CONFIG_FILE = Path("config/behavior/datagen.yaml").absolute()
 MODELING_CONFIG_FILE = Path("config/behavior/modeling.yaml").absolute()
+SKYNET_CONFIG_FILE = Path("config/behavior/skynet.yaml").absolute()
 POSTGRESQL_CONF = Path("config/postgres/default_postgresql.conf").absolute()
 
 # Output: model directory.
@@ -32,6 +33,21 @@ ARTIFACT_DATA_MERGE = ARTIFACTS_PATH / "data/merge"
 ARTIFACT_MODELS = ARTIFACTS_PATH / "models"
 ARTIFACT_EVALS_OU = ARTIFACTS_PATH / "evals_ou"
 ARTIFACT_EVALS_QUERY = ARTIFACTS_PATH / "evals_query"
+
+
+def task_behavior_skynet():
+    """
+    Behavior: Generate a run.sh script for executing an end-to-end pipeline.
+    """
+    skynet_args = (
+        f"--config-file {SKYNET_CONFIG_FILE} "
+    )
+
+    return {
+        "actions": [f"python3 -m behavior skynet {skynet_args}",],
+        "uptodate": [False],
+        "verbosity": VERBOSITY_DEFAULT,
+    }
 
 
 def task_behavior_generate_workloads():
@@ -178,6 +194,33 @@ def task_behavior_execute_workloads():
     }
 
 
+def task_behavior_perform_plan_extract_ou():
+    """
+    Behavior modeling: extract OUs from the experiment results.
+    """
+
+    def extract_ou(glob_pattern):
+        args = f"--dir-datagen-data {ARTIFACT_DATA_RAW} "
+        if glob_pattern is not None:
+            args = args + f"--glob-pattern '{glob_pattern}'"
+
+        return f"python3 -m behavior extract_ou {args}"
+
+    return {
+        "actions": [CmdAction(extract_ou, buffering=1),],
+        "uptodate": [False],
+        "verbosity": VERBOSITY_DEFAULT,
+        "params": [
+            {
+                "name": "glob_pattern",
+                "long": "glob_pattern",
+                "help": "Glob pattern for selecting which experiments to perform differencing.",
+                "default": None,
+            },
+        ],
+    }
+
+
 def task_behavior_perform_plan_extract_qss():
     """
     Behavior modeling: extract features from query state store and standardize columns.
@@ -223,11 +266,10 @@ def task_behavior_perform_plan_diff():
     Behavior modeling: perform plan differencing.
     """
 
-    def datadiff_action(glob_pattern, output_ous, per_tuple_overhead_us):
+    def datadiff_action(glob_pattern, output_ous):
         datadiff_args = (
             f"--dir-datagen-data {ARTIFACT_DATA_QSS} "
             f"--dir-output {ARTIFACT_DATA_DIFF} "
-            f"--per-tuple-overhead-us {per_tuple_overhead_us} "
         )
 
         if glob_pattern is not None:
@@ -267,12 +309,6 @@ def task_behavior_perform_plan_diff():
                 "help": "Comma separated list of OUs to output.",
                 "default": None,
             },
-            {
-                "name": "per_tuple_overhead_us",
-                "long": "per_tuple_overhead_us",
-                "help": "TScout overhead to measure child plan tuples.",
-                "default": 0.0,
-            }
         ],
     }
 
@@ -421,7 +457,7 @@ def task_behavior_eval_query():
     """
     Behavior modeling: perform query-level model analysis.
     """
-    def eval_cmd(session_sql, eval_raw_data, base_models, psycopg2_conn, num_iterations):
+    def eval_cmd(session_sql, eval_raw_data, base_models, psycopg2_conn, num_iterations, predictive):
         if base_models is None:
             # Find the latest experiment by last modified timestamp.
             experiment_list = sorted((exp_path for exp_path in ARTIFACT_MODELS.glob("*")), key=os.path.getmtime)
@@ -438,6 +474,7 @@ def task_behavior_eval_query():
             f"--dir-evals-output {ARTIFACT_EVALS_QUERY} "
             f"--psycopg2-conn \"{psycopg2_conn}\" "
             f"--num-iterations {num_iterations} "
+            f"--predictive {predictive} "
         )
 
         if session_sql is not None:
@@ -481,5 +518,29 @@ def task_behavior_eval_query():
                 "help": "Number of iterations to attempt to converge predictions.",
                 "default": 1,
             },
+            {
+                "name": "predictive",
+                "long": "predictive",
+                "help": "Whether to perform predictive analysis.",
+                "default": True,
+            },
         ],
+    }
+
+
+def task_behavior_eval_query_plots():
+    """
+    Behavior modeling: generate plots from eval_query analysis.
+    """
+    def eval_cmd():
+        eval_args = (
+            f"--dir-input {ARTIFACT_EVALS_QUERY} "
+        )
+
+        return f"python3 -m behavior eval_query_plots {eval_args}"
+
+    return {
+        "actions": [CmdAction(eval_cmd, buffering=1)],
+        "verbosity": VERBOSITY_DEFAULT,
+        "uptodate": [False],
     }
