@@ -95,8 +95,8 @@ def _evaluate_query_for_plan(conn, query_str):
 
             cur_total_cost = ou["total_cost"]
             cur_startup_cost = ou["startup_cost"]
-            ou["total_cost"] -= accum_total_cost
-            ou["startup_cost"] -= accum_startup_cost
+            ou["total_cost"] = max(ou["total_cost"] - accum_total_cost, 0)
+            ou["startup_cost"] = max(ou["startup_cost"] - accum_startup_cost, 0)
             ou["query_text"] = query_str
             template_ous.append(ou)
             return cur_total_cost, cur_startup_cost

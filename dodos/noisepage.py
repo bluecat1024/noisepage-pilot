@@ -102,6 +102,7 @@ def task_noisepage_init():
     """
 
     def run_noisepage_detached(config):
+        assert Path(config).exists(), f"{config} does not exist."
         local["cp"][f"{config}", f"{DEFAULT_PGDATA}/postgresql.conf"].run_nohup()
         ret = local["./pg_ctl"]["start", "-D", DEFAULT_PGDATA].run_nohup(stdout="noisepage.out")
         print(f"NoisePage PID: {ret.pid}")

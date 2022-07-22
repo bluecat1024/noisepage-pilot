@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import xml.etree.ElementTree as ET
 import logging
 import shutil
@@ -38,7 +39,7 @@ class SkynetCLI(cli.Application):
         run.write("#############################\n")
         run.write("# Train Models\n")
         run.write("#############################\n")
-        run.write(("#" if self.config["train_models"] is None else "") + "rm -rf artifacts/behavior/models/*\n")
+        run.write(("#" if len(self.config["train_models"]) == 0 else "") + "rm -rf artifacts/behavior/models/*\n")
         for config in self.config["train_models"]:
             allowed_features = ",".join([
                 "IndexOnlyScan_num_iterator_used",
@@ -81,8 +82,9 @@ class SkynetCLI(cli.Application):
         run.write("#############################\n")
         run.write(("#" if len(self.config["eval_query"]) == 0 else "") + "rm -rf artifacts/behavior/evals_query/*\n")
         for config in self.config["eval_query"]:
+            run.write("sudo pkill postgres || true\n")
             run.write("rm -rf /tmp/eval_query_scratch/\n")
-            run.write(f"doit noisepage_init --config={config['pg_conf_path']}\n")
+            run.write(f"doit noisepage_init --config={os.getcwd()}/{config['pg_conf_path']}\n")
             run.write("doit benchbase_bootstrap_dbms\n")
             run.write(f"./artifacts/noisepage/pg_restore -j 8 -d benchbase {config['restore_db_path']}\n")
             run.write("./artifacts/noisepage/psql --dbname=benchbase --command=\"VACUUM\"\n")
@@ -120,7 +122,6 @@ class SkynetCLI(cli.Application):
             run.write("# Output\n")
             run.write("#############################\n")
             run.write(f"mkdir -p {self.config['output_path']}\n")
-            run.write(f"rm -rf {self.config['output_path']}/*\n")
             run.write("cd artifacts/behavior\n")
             run.write(("#" if not self.config["zip_data"] else "") + "tar zcf data.tgz data/merge data/raw\n")
             run.write(("#" if not self.config["zip_models"] else "") + "tar zcf models.tgz models\n")
