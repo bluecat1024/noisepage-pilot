@@ -223,6 +223,8 @@ def prepare_inference_query_stream(dir_data):
     pg_qss_stats = pd.read_csv(dir_data / "pg_qss_stats.csv")
     assert pg_qss_stats.shape[0] > 0
     query_stats = pg_qss_stats[pg_qss_stats.plan_node_id == -1]
+    # counter0 is 1 if the query has successfully executed.
+    query_stats = query_stats[query_stats.counter0 == 1]
     query_stats.drop(columns=[f"counter{i}" for i in range(0, 10)] + ["plan_node_id"], inplace=True, errors='raise')
     query_stats["params"] = query_stats.comment.fillna('')
     del pg_qss_stats

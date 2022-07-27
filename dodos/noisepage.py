@@ -76,7 +76,6 @@ def task_noisepage_build():
             lambda: os.chdir(doit.get_initial_workdir()),
             f"mkdir -p {ARTIFACTS_PATH}",
             f"cp {BUILD_PATH / 'build/bin/*'} {ARTIFACTS_PATH}",
-            "sudo apt-get install --yes bpfcc-tools linux-headers-$(uname -r)",
             # Reset working directory.
             lambda: os.chdir(doit.get_initial_workdir()),
         ],
@@ -189,7 +188,8 @@ def task_noisepage_qss_install():
             statement_timestamp bigint,
             features text,
             primary key(query_id, generation, db_id, pid)
-            )""",
+            )
+            WITH (autovacuum_enabled = OFF)""",
         """CREATE UNLOGGED TABLE pg_catalog.pg_qss_stats(
             query_id bigint,
 	    db_id integer,
@@ -209,7 +209,8 @@ def task_noisepage_qss_install():
 	    counter9 float8,
             payload bigint,
             comment text
-            )""",
+            )
+            WITH (autovacuum_enabled = OFF)""",
         "ALTER SYSTEM SET shared_preload_libraries='qss'",
         "DROP EXTENSION IF EXISTS qss",
         "CREATE EXTENSION qss",
