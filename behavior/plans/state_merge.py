@@ -70,8 +70,9 @@ def merge_index_metadata(data, metadata, column, time_pg_stats):
     data = pd.merge_asof(data, metadata, left_index=True, right_index=True, left_by=[column], right_by=["indexrelid"], allow_exact_matches=True)
 
     # eliminate all rows with no valid metadata
-    data.drop(data[data.indexrelid.isna()].index, inplace=True)
     data.reset_index(drop=False, inplace=True)
+    data.drop(data[data.indexrelid.isna()].index, inplace=True)
+    data.reset_index(drop=True, inplace=True)
 
     # Switch index back to unix_timestamp.
     data.set_index(keys=["unix_timestamp"], drop=True, append=False, inplace=True)

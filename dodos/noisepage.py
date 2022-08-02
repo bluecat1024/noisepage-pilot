@@ -1,3 +1,4 @@
+import time
 import os
 from pathlib import Path
 
@@ -97,7 +98,7 @@ def task_noisepage_build():
 
 def task_noisepage_init():
     """
-    NoisePage: run NoisePage in detached mode.
+    NoisePage: start a clean NoisePage instance in detached mode.
     """
 
     def run_noisepage_detached(config):
@@ -136,6 +137,36 @@ def task_noisepage_init():
         ],
     }
 
+
+def task_noisepage_stop():
+    """
+    NoisePage: stop NoisePage instance.
+    """
+
+    def stop(data):
+        while len(list(local.pgrep("postgres"))) != 0:
+            local["./pg_ctl"]["stop", "-D", data].run_fg(retcode=None)
+            time.sleep(5)
+
+    return {
+        "actions": [
+            lambda: os.chdir(ARTIFACTS_PATH),
+            stop,
+            # Reset working directory.
+            lambda: os.chdir(doit.get_initial_workdir()),
+        ],
+        "file_dep": [ARTIFACT_pg_ctl],
+        "uptodate": [False],
+        "verbosity": VERBOSITY_DEFAULT,
+        "params": [
+            {
+                "name": "data",
+                "long": "data",
+                "help": "Postgres Data Directory location",
+                "default": DEFAULT_PGDATA,
+            },
+        ],
+    }
 
 def task_noisepage_swap_config():
     """
@@ -211,9 +242,11 @@ def task_noisepage_qss_install():
             comment text
             )
             WITH (autovacuum_enabled = OFF)""",
-        "ALTER SYSTEM SET shared_preload_libraries='qss'",
+        "ALTER SYSTEM SET shared_preload_libraries='qss','pgstattuple'",
         "DROP EXTENSION IF EXISTS qss",
+        "DROP EXTENSION IF EXISTS pgstattuple",
         "CREATE EXTENSION qss",
+        "CREATE EXTENSION pgstattuple",
     ]
 
     def run_query_in_db(dbname):

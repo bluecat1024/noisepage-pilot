@@ -33,6 +33,11 @@ def transform_ou_df(node_name, ou_df):
     if len(derived_map) > 0:
         ou_df.rename(columns=derived_map, inplace=True, errors='raise')
 
+    # IndexScan_num_outer_loops should be at least 1.
+    # There are recording cases where this value can be 0 so we adjust it.
+    if "IndexScan_num_outer_loops" in ou_df.columns:
+        ou_df["IndexScan_num_outer_loops"] = np.clip(ou_df.IndexScan_num_outer_loops, 1, None)
+
     features_drop = [f"counter{i}" for i in range(10)] + ["payload", "comment"]
     ou_df.drop(columns=features_drop, inplace=True, errors='ignore')
     return ou_df

@@ -4,6 +4,7 @@ from plumbum import cli
 
 from behavior import skynet
 from behavior.datagen import generate_workloads
+from behavior.datagen import pg_collector
 from behavior.plans import extract_ou
 from behavior.plans import extract_qss
 from behavior.plans import diff
@@ -33,4 +34,5 @@ if __name__ == "__main__":
     BehaviorCLI.subcommand("eval_ou", eval_ou.EvalOUCLI)
     BehaviorCLI.subcommand("eval_query", eval_query.EvalQueryCLI)
     BehaviorCLI.subcommand("eval_query_plots", eval_query_plots.EvalQueryPlotsCLI)
+    BehaviorCLI.subcommand("collector", pg_collector.CollectorCLI)
     BehaviorCLI.run()

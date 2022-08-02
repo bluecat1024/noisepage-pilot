@@ -14,25 +14,28 @@ def task_collector_init():
     Collector: attach collector to a running NoisePage instance.
     """
 
-    def start_collector(output_dir, wait_time, collector_fast_interval, collector_slow_interval):
+    def start_collector(benchmark, output_dir, wait_time, collector_interval):
         if output_dir is None:
             print("Unable to start collector without an output directory")
+            return False
+
+        if benchmark is None:
+            print("Unable to start collector without a benchmark")
             return False
 
         output_dir = Path(output_dir).absolute()
         print("Attaching collector.")
 
-        dir_collector = BUILD_PATH / "cmudb/collector"
-        os.chdir(dir_collector)
-
         arguments = [
-            "collector.py",
+            "-m",
+            "behavior",
+            "collector",
+            "--benchmark",
+            benchmark,
             "--outdir",
             output_dir,
-            "--collector_fast_interval",
-            collector_fast_interval,
-            "--collector_slow_interval",
-            collector_slow_interval
+            "--collector_interval",
+            collector_interval
         ]
 
         local["python3"][arguments].run_bg(
@@ -51,6 +54,12 @@ def task_collector_init():
         "verbosity": VERBOSITY_DEFAULT,
         "params": [
             {
+                "name": "benchmark",
+                "long": "benchmark",
+                "help": "Benchmark name that is executed",
+                "default": None,
+            },
+            {
                 "name": "output_dir",
                 "long": "output_dir",
                 "help": "Directory that collector should output to",
@@ -63,16 +72,10 @@ def task_collector_init():
                 "default": 10,
             },
             {
-                "name": "collector_fast_interval",
-                "long": "collector_fast_interval",
-                "help": "Interval (seconds) to collect (frequent) information from database.",
-                "default": 1,
-            },
-            {
-                "name": "collector_slow_interval",
-                "long": "collector_slow_interval",
+                "name": "collector_interval",
+                "long": "collector_interval",
                 "help": "Interval (seconds) to collect (infrequent) information from database.",
-                "default": 60,
+                "default": 30,
             },
         ],
     }
@@ -84,14 +87,13 @@ def task_collector_shutdown():
     """
 
     def shutdown_collector():
-        local["pkill"]["-SIGINT", "-i", "-f", "collector.py"](retcode=None)
-        while len(list(local.pgrep("collector.py"))) != 0:
+        local["pkill"]["-SIGINT", "-i", "-f", "behavior collector"](retcode=None)
+        local["pkill"]["-SIGINT", "-i", "-f", "Userspace Collector"](retcode=None)
+        while len(list(local.pgrep("behavior collector"))) != 0:
             print("Waiting for collector to shutdown from SIGINT.")
             time.sleep(5)
 
-        # Nuke that irritating psycache folder.
-        dir_collector = BUILD_PATH / "cmudb/collector/__pycache__"
-        cmd.sudo["rm", "-rf", dir_collector]()
+        print("Shutdown collector with SIGINT.")
 
     return {
         "actions": [shutdown_collector],

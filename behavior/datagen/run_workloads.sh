@@ -210,7 +210,7 @@ for workload in "${workload_directory}"/*; do
                 fi
 
                 # Remove existing logfiles, if any exist.
-                ${pg_ctl} stop -D "${PGDATA_LOCATION}" -m smart
+                doit noisepage_stop --data="${PGDATA_LOCATION}"
                 rm -rf "${PGDATA_LOCATION}/log/*.csv"
                 rm -rf "${PGDATA_LOCATION}/log/*.log"
                 rm -rf "${BENCHMARK_LOCATION}/results/*"
@@ -261,7 +261,7 @@ for workload in "${workload_directory}"/*; do
             then
                 # Initialize collector. We currently don't have a means by which to check whether
                 # collector has successfully attached to the instance. As such, we (wait) 10 seconds.
-                doit collector_init --output_dir="${benchmark_output}" --wait_time=10 --collector_fast_interval=1 --collector_slow_interval=30
+                doit collector_init --benchmark="${benchmark}" --output_dir="${benchmark_output}" --wait_time=10 --collector_interval=30
             fi
 
             # Execute the benchmark
@@ -278,7 +278,8 @@ for workload in "${workload_directory}"/*; do
                 plans_file="${benchmark_output}/pg_qss_plans.csv"
                 stats_file="${benchmark_output}/pg_qss_stats.csv"
                 ${psql} --dbname=benchbase --csv --command="SELECT * FROM pg_catalog.pg_qss_plans;" > "${plans_file}"
-                ${psql} --dbname=benchbase --csv --command="SELECT * FROM pg_catalog.pg_qss_stats;" > "${stats_file}"
+                # Hopefully this does not blow up.
+                ${psql} --dbname=benchbase --csv --command="SELECT * FROM pg_catalog.pg_qss_stats ORDER BY statement_timestamp;" > "${stats_file}"
             fi
 
             # Similarly, we move the postgres log file to the experiment output directory if it
@@ -286,7 +287,7 @@ for workload in "${workload_directory}"/*; do
             log=${PGDATA_LOCATION}/log
             if [ "${continuous}" != 'True' ];
             then
-                ${pg_ctl} stop -D "${PGDATA_LOCATION}" -m smart
+                doit noisepage_stop --data="${PGDATA_LOCATION}"
             else
                 postexecute_path=$(realpath "${post_execute[$i]}")
                 ${psql} --dbname=benchbase -f "${postexecute_path}"
@@ -304,7 +305,7 @@ for workload in "${workload_directory}"/*; do
 
         if [ "${continuous}" == 'True' ];
         then
-            ${pg_ctl} stop -D "${PGDATA_LOCATION}" -m smart
+            doit noisepage_stop --data="${PGDATA_LOCATION}"
             mv "${PGDATA_LOCATION}/log" "${benchmark_output}/log"
         fi
     )

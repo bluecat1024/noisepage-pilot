@@ -28,7 +28,7 @@ class SkynetCLI(cli.Application):
         run.write(("#" if not self.config["workload_generate"] else "") + "doit behavior_generate_workloads\n")
         run.write(("#" if not self.config["workload_execute"] else "") + "rm -rf artifacts/behavior/data/raw/experiment-*\n")
         run.write(("#" if not self.config["workload_execute"] else "") + "doit behavior_execute_workloads\n")
-        run.write(("#" if not self.config["workload_execute"] else "") + "mv artifacts/behavior/data/raw/experiment-*/* artifacts/behavior/data/raw/experiment\n")
+        run.write(("#" if not self.config["workload_execute"] else "") + "mv artifacts/behavior/data/raw/experiment-* artifacts/behavior/data/raw/experiment\n")
         run.write(("#" if not self.config["workload_process"] else "") + "doit behavior_perform_plan_extract_ou\n")
         run.write(("#" if not self.config["workload_process"] else "") + "doit behavior_perform_plan_extract_qss\n")
         run.write(("#" if not self.config["workload_process"] else "") + "doit behavior_perform_plan_diff\n")

@@ -111,8 +111,9 @@ def merge_modifytable_data(name=None, root=None, data=None, pg_class=None, proce
 
     # Merge the pg_class table against ModifyTableInsert/Update.
     time_data = pd.merge_asof(data, time_tables, left_index=True, right_index=True, left_by=["ModifyTable_target_oid"], right_by=["oid"], allow_exact_matches=True)
-    time_data.drop(time_data[time_data.oid.isna()].index, inplace=True)
     time_data.reset_index(drop=False, inplace=True)
+    time_data.drop(time_data[time_data.oid.isna()].index, inplace=True)
+    time_data.reset_index(drop=True, inplace=True)
     return time_data
 
 
@@ -190,7 +191,9 @@ def build_time_index_metadata(pg_index, tables, cls_indexes, pg_attribute):
     pg_index.sort_index(axis=0, inplace=True)
 
     time_pg_index = pd.merge_asof(cls_indexes, pg_index, left_index=True, right_index=True, left_by=["oid"], right_by=["indexrelid"], allow_exact_matches=True)
+    time_pg_index.reset_index(drop=False, inplace=True)
     time_pg_index.drop(time_pg_index[time_pg_index.indexrelid.isna()].index, inplace=True)
+    time_pg_index.set_index(keys=["unix_timestamp"], drop=True, append=False, inplace=True)
 
     # It's super unfortunate that we have to do this but this is because merge_asof can
     # insert NaN which converts an integer column -> float column. so we convert it back :)
@@ -205,7 +208,9 @@ def build_time_index_metadata(pg_index, tables, cls_indexes, pg_attribute):
     tables.sort_index(axis=0, inplace=True)
 
     time_pg_index = pd.merge_asof(time_pg_index, tables, left_index=True, right_index=True, left_by=["indrelid"], right_by=["table_oid"], allow_exact_matches=True)
+    time_pg_index.reset_index(drop=False, inplace=True)
     time_pg_index.drop(time_pg_index[time_pg_index.table_oid.isna()].index, inplace=True)
+    time_pg_index.set_index(keys=["unix_timestamp"], drop=True, append=False, inplace=True)
     time_pg_index.drop(labels=["table_oid"], axis=1, inplace=True)
     time_pg_index.indrelid = time_pg_index.indrelid.astype(int)
     del tables
