@@ -222,7 +222,7 @@ def prepare_inference_query_stream(dir_data):
     query_id_index = ["query_id", "db_id", "pid"]
     pg_qss_stats = pd.read_csv(dir_data / "pg_qss_stats.csv")
     assert pg_qss_stats.shape[0] > 0
-    query_stats = pg_qss_stats[pg_qss_stats.plan_node_id == -1]
+    query_stats = pg_qss_stats[(pg_qss_stats.plan_node_id == -1) & (pg_qss_stats.query_id != 0)]
     # counter0 is 1 if the query has successfully executed.
     query_stats = query_stats[query_stats.counter0 == 1]
     query_stats.drop(columns=[f"counter{i}" for i in range(0, 10)] + ["plan_node_id"], inplace=True, errors='raise')
@@ -276,7 +276,7 @@ def prepare_inference_query_stream(dir_data):
             parts.append(query_text)
             query_text = "".join(parts)
         query_stats.at[query.Index, "query_text"] = query_text
-    query_stats.drop(labels=["params", "id", "generation"], axis=1, inplace=True)
+    query_stats.drop(labels=["params", "id", "generation", "comment", "txn"], axis=1, inplace=True)
 
     # Sort by statement_timestamp so we are processing the query stream in serial.
     query_stats.set_index(keys=["statement_timestamp"], drop=True, append=False, inplace=True)

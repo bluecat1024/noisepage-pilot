@@ -38,7 +38,7 @@ def transform_ou_df(node_name, ou_df):
     if "IndexScan_num_outer_loops" in ou_df.columns:
         ou_df["IndexScan_num_outer_loops"] = np.clip(ou_df.IndexScan_num_outer_loops, 1, None)
 
-    features_drop = [f"counter{i}" for i in range(10)] + ["payload", "comment"]
+    features_drop = [f"counter{i}" for i in range(10)] + ["payload", "comment", "txn"]
     ou_df.drop(columns=features_drop, inplace=True, errors='ignore')
     return ou_df
 
@@ -55,7 +55,7 @@ def main(data_dir, experiment) -> None:
 
         # Load in the query state store execution counters.
         qss_stats = pd.read_csv(pg_qss_stats)
-        qss_stats = qss_stats[qss_stats.plan_node_id != -1]
+        qss_stats = qss_stats[(qss_stats.plan_node_id != -1) & (qss_stats.query_id != 0) & (qss_stats.statement_timestamp != 0)]
         if qss_stats.shape[0] == 0:
             logger.info("Skipping %s", bench_name)
             continue

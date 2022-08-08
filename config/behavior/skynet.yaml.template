@@ -3,6 +3,7 @@ skynet:
   workload_generate: False
   workload_execute: False
   workload_process: False
+  workload_filters: ["*"]
 
   # List of models to train in format [experiment/<data_path>, models/<output_name>/, use_featurewiz].
   train_models:

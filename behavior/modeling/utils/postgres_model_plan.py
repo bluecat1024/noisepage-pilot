@@ -436,6 +436,8 @@ def _compute_derived_ous(conn, ou, template_ous, metadata, predictive):
     elif ou_type == OperatingUnit.ModifyTableInsert or ou_type == OperatingUnit.ModifyTableUpdate or ou_type == OperatingUnit.ModifyTableDelete:
         if ou_type == OperatingUnit.ModifyTableUpdate:
             ou["ModifyTableUpdate_num_updates"] = get_key("ModifyTable_input_plan_rows", ou)
+        if ou_type == OperatingUnit.ModifyTableDelete:
+            ou["ModifyTableDelete_num_deletes"] = get_key("ModifyTable_input_plan_rows", ou)
         add_ous.extend(_simulate_modify_table(conn, ou, template_ous, metadata, predictive))
 
     elif ou_type == OperatingUnit.Agg:

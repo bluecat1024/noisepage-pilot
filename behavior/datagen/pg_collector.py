@@ -30,6 +30,7 @@ PG_COLLECTOR_TARGETS = {
     "pg_class": "SELECT EXTRACT(epoch from NOW())*1000000 as time, * FROM pg_class t JOIN pg_namespace n ON n.oid = t.relnamespace WHERE n.nspname = 'public';",
     "pg_index": "SELECT EXTRACT(epoch from NOW())*1000000 as time, * FROM pg_index;",
     "pg_attribute": "SELECT EXTRACT(epoch from NOW())*1000000 as time, * FROM pg_attribute;",
+    "pg_stat_user_tables": "SELECT EXTRACT(epoch from NOW())*1000000 as time, * FROM pg_stat_user_tables;",
 }
 
 

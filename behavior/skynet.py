@@ -29,7 +29,12 @@ class SkynetCLI(cli.Application):
         run.write(("#" if not self.config["workload_execute"] else "") + "rm -rf artifacts/behavior/data/raw/experiment-*\n")
         run.write(("#" if not self.config["workload_execute"] else "") + "doit behavior_execute_workloads\n")
         run.write(("#" if not self.config["workload_execute"] else "") + "mv artifacts/behavior/data/raw/experiment-* artifacts/behavior/data/raw/experiment\n")
-        run.write(("#" if not self.config["workload_process"] else "") + "doit behavior_perform_plan_extract_ou\n")
+
+        filters = "*"
+        if "workload_filters" in self.config and len(self.config["workload_filters"]) > 0:
+            filters = ",".join(self.config["workload_filters"])
+
+        run.write(("#" if not self.config["workload_process"] else "") + f"doit behavior_perform_plan_extract_ou --glob_pattern={filters}\n")
         run.write(("#" if not self.config["workload_process"] else "") + "doit behavior_perform_plan_extract_qss\n")
         run.write(("#" if not self.config["workload_process"] else "") + "doit behavior_perform_plan_diff\n")
         run.write(("#" if not self.config["workload_process"] else "") + "doit behavior_perform_plan_state_merge\n")
@@ -43,6 +48,7 @@ class SkynetCLI(cli.Application):
         for config in self.config["train_models"]:
             allowed_features = ",".join([
                 "IndexOnlyScan_num_iterator_used",
+                "IndexOnlyScan_num_defrag",
                 "IndexScan_num_iterator_used",
                 "IndexScan_num_outer_loops",
                 "IndexScan_num_defrag",
@@ -51,6 +57,7 @@ class SkynetCLI(cli.Application):
                 "ModifyTableIndexInsert_num_splits",
                 "ModifyTableUpdate_num_updates",
                 "ModifyTableUpdate_num_extends",
+                "ModifyTableDelete_num_deletes",
                 "Agg_num_input_rows",
                 "NestLoop_num_outer_rows",
                 "NestLoop_num_inner_rows_cumulative"

@@ -239,6 +239,7 @@ def task_noisepage_qss_install():
 	    counter8 float8,
 	    counter9 float8,
             payload bigint,
+            txn bigint,
             comment text
             )
             WITH (autovacuum_enabled = OFF)""",

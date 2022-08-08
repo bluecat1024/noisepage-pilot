@@ -214,7 +214,7 @@ def task_behavior_perform_plan_extract_ou():
             {
                 "name": "glob_pattern",
                 "long": "glob_pattern",
-                "help": "Glob pattern for selecting which experiments to perform differencing.",
+                "help": "Glob pattern for selecting which experiments to extract OUs for.",
                 "default": None,
             },
         ],
@@ -248,7 +248,7 @@ def task_behavior_perform_plan_extract_qss():
             {
                 "name": "glob_pattern",
                 "long": "glob_pattern",
-                "help": "Glob pattern for selecting which experiments to perform differencing.",
+                "help": "Glob pattern for selecting which experiments to extract query state features for.",
                 "default": None,
             },
             {
