@@ -5,14 +5,14 @@ from plumbum import cli
 from behavior import skynet
 from behavior.datagen import generate_workloads
 from behavior.datagen import pg_collector
-from behavior.plans import extract_ou
-from behavior.plans import extract_qss
-from behavior.plans import diff
-from behavior.plans import state_merge
-from behavior.modeling import train
-from behavior.modeling import eval_ou
-from behavior.modeling import eval_query
-from behavior.modeling import eval_query_plots
+from behavior.model_ous.process import extract_ou
+from behavior.model_ous.process import extract_qss
+from behavior.model_ous.process import diff
+from behavior.model_ous.process import state_merge
+from behavior.model_ous import train
+from behavior.model_ous import eval_ou
+from behavior.model_query import eval_query
+from behavior.model_query import eval_query_plots
 
 logger = logging.getLogger(__name__)
 

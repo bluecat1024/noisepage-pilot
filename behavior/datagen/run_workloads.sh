@@ -225,7 +225,7 @@ for workload in "${workload_directory}"/*; do
                 if [ "$pg_analyze" != 'False' ];
                 then
                     # If pg_analyze is specified, then run ANALYZE on the benchmark's tables.
-                    doit behavior_pg_analyze_benchmark --benchmark="${benchmark}"
+                    doit benchbase_pg_analyze_benchmark --benchmark="${benchmark}"
                 fi
 
                 # shellcheck disable=2154 # populated by niet
@@ -233,7 +233,7 @@ for workload in "${workload_directory}"/*; do
                 then
                     # If pg_prewarm is specified, then invoke pg_prewarm on the benchmark's tables.
                     doit benchbase_prewarm_install
-                    doit behavior_pg_prewarm_benchmark --benchmark="${benchmark}"
+                    doit benchbase_pg_prewarm_benchmark --benchmark="${benchmark}"
                 fi
             elif [ "${continuous}" != 'True' ];
             then
@@ -245,7 +245,7 @@ for workload in "${workload_directory}"/*; do
                 if [ "$pg_analyze" != 'False' ];
                 then
                     # If pg_analyze is specified, then run ANALYZE on the benchmark's tables.
-                    doit behavior_pg_analyze_benchmark --benchmark="${benchmark}"
+                    doit benchbase_pg_analyze_benchmark --benchmark="${benchmark}"
                 fi
 
                 # shellcheck disable=2154 # populated by niet
@@ -253,7 +253,7 @@ for workload in "${workload_directory}"/*; do
                 then
                     # If pg_prewarm is specified, then invoke pg_prewarm on the benchmark's tables.
                     doit benchbase_prewarm_install
-                    doit behavior_pg_prewarm_benchmark --benchmark="${benchmark}"
+                    doit benchbase_pg_prewarm_benchmark --benchmark="${benchmark}"
                 fi
             fi
 

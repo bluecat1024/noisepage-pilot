@@ -10,7 +10,6 @@ from sklearn.linear_model import ElasticNet, HuberRegressor
 from sklearn.multioutput import MultiOutputRegressor
 from sklearn.neural_network import MLPRegressor
 from sklearn.preprocessing import RobustScaler, StandardScaler
-from behavior.modeling import featurize
 
 
 def get_model(method, config):
@@ -183,24 +182,6 @@ class BehaviorModel:
             y = np.clip(y, 0, None)
 
         return y
-
-    def convert_raw_input(self, X):
-        """
-        Given X which is a raw input feature vector, this function returns X'
-        by applying the feature configuration contained in self.features. X'
-        can be passed to predict.
-
-        Parameters
-        ----------
-        X : pandas.DataFrame
-            Input DataFrame of X's to predict the Y's for.
-
-        Returns
-        -------
-        X' : pandas.DataFrame
-            Transformed X' that can be used as inputs to the model.
-        """
-        return featurize.extract_input_features(X, self.features)
 
     def save(self, output_path):
         """Save the model to disk.

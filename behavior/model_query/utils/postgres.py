@@ -7,14 +7,7 @@ from pathlib import Path
 from enum import Enum, auto, unique
 import pandas as pd
 import numpy as np
-from behavior.modeling import featurize
-from behavior.datagen.pg_collector_utils import SettingType, _time_unit_to_ms, _parse_field, KNOBS
-from sklearn.metrics import (
-    mean_absolute_error,
-    mean_absolute_percentage_error,
-    mean_squared_error,
-    r2_score,
-)
+from behavior.datagen.pg_collector_utils import _parse_field, KNOBS
 
 
 def prepare_pg_inference_state(conn):

@@ -12,7 +12,7 @@ from plumbum import cli
 from tqdm import tqdm
 
 from behavior import OperatingUnit
-from behavior.plans import (
+from behavior.model_ous.process import (
     DiffPlanIncompleteSubinvocationException,
     DiffPlanInvalidDataException,
     DiffPlanUnsupportedParallelException,
@@ -124,7 +124,7 @@ def diff_query_invocation(subinvocation, diffed_matrices):
     diffed_matrices : list[np.pdarray]
         Output list to store diffed numpy matrices.
     """
-    # diff_c.so is compiled from behavior/plans/diff_c.pyx. If an error is thrown
+    # diff_c.so is compiled from behavior/model_ous/process/diff_c.pyx. If an error is thrown
     # saying that diff_c can't be found, then please ensure your PYTHONPATH is
     # setup correctly.
     #

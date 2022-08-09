@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from plumbum import cli
 from behavior import Targets
-from behavior.modeling.utils.evaluate_ou import evaluate_ou_model
+from behavior.utils.evaluate_ou import evaluate_ou_model
 
 
 def create_plots(output_dir, method, raw_df, preds_path):

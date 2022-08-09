@@ -6,7 +6,7 @@ cimport numpy as np
 # The following are relevant column offsets for the OU subinvocation matrix used by diff_query_tree().
 # These offsets describe the location of a DIFFERENCING_SCHEMA column in the 2D numpy matrix.
 
-from behavior.plans import (
+from behavior.model_ous.process import (
     DIFF_PLAN_NODE_ID_SCHEMA_INDEX,
     DIFF_LEFT_CHILD_PLAN_NODE_ID_SCHEMA_INDEX,
     DIFF_RIGHT_CHILD_PLAN_NODE_ID_SCHEMA_INDEX,

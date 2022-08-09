@@ -6,7 +6,6 @@ from plumbum import local, FG
 
 import dodos.benchbase
 import dodos.noisepage
-from behavior import BENCHDB_TO_TABLES
 from dodos import VERBOSITY_DEFAULT, default_artifacts_path, default_build_path
 from dodos.benchbase import ARTIFACTS_PATH as BENCHBASE_ARTIFACTS_PATH
 from dodos.noisepage import (
@@ -85,82 +84,6 @@ def task_behavior_generate_workloads():
                 "long": "clear_existing",
                 "help": "Remove existing generated workloads.",
                 "default": True,
-            },
-        ],
-    }
-
-
-def task_behavior_pg_analyze_benchmark():
-    """
-    Behavior modeling:
-
-    Run ANALYZE on all the tables in the given benchmark.
-    This updates internal statistics for estimating cardinalities and costs.
-
-    Parameters
-    ----------
-    benchmark : str
-        The benchmark whose tables should be analyzed.
-    """
-
-    def pg_analyze(benchmark):
-        if benchmark is None or benchmark not in BENCHDB_TO_TABLES:
-            print(f"Benchmark {benchmark} is not specified or does not exist.")
-            return False
-
-        for table in BENCHDB_TO_TABLES[benchmark]:
-            query = f"ANALYZE VERBOSE {table};"
-            local[str(ARTIFACT_psql)]["--dbname=benchbase"]["--command"][query]()
-
-    return {
-        "actions": [pg_analyze],
-        "file_dep": [ARTIFACT_psql],
-        "uptodate": [False],
-        "verbosity": VERBOSITY_DEFAULT,
-        "params": [
-            {
-                "name": "benchmark",
-                "long": "benchmark",
-                "help": "Benchmark whose tables should be analyzed.",
-                "default": None,
-            },
-        ],
-    }
-
-
-def task_behavior_pg_prewarm_benchmark():
-    """
-    Behavior modeling:
-
-    Run pg_prewarm() on all the tables in the given benchmark.
-    This warms the buffer pool and OS page cache.
-
-    Parameters
-    ----------
-    benchmark : str
-        The benchmark whose tables should be prewarmed.
-    """
-
-    def pg_prewarm(benchmark):
-        if benchmark is None or benchmark not in BENCHDB_TO_TABLES:
-            print(f"Benchmark {benchmark} is not specified or does not exist.")
-            return False
-
-        for table in BENCHDB_TO_TABLES[benchmark]:
-            query = f"SELECT * FROM pg_prewarm('{table}');"
-            local[str(ARTIFACT_psql)]["--dbname=benchbase"]["--command"][query]()
-
-    return {
-        "actions": [pg_prewarm],
-        "file_dep": [ARTIFACT_psql],
-        "uptodate": [False],
-        "verbosity": VERBOSITY_DEFAULT,
-        "params": [
-            {
-                "name": "benchmark",
-                "long": "benchmark",
-                "help": "Benchmark whose tables should be analyzed.",
-                "default": None,
             },
         ],
     }
@@ -284,8 +207,8 @@ def task_behavior_perform_plan_diff():
     return {
         "actions": [
             # The following command is necessary to force a rebuild everytime. Recompile diff_c.pyx.
-            "rm -f behavior/plans/diff_c.c",
-            f"python3 behavior/plans/setup.py build_ext --build-lib artifacts/ --build-temp {default_build_path()}",
+            "rm -f behavior/model_ous/process/diff_c.c",
+            f"python3 behavior/model_ous/process/setup.py build_ext --build-lib artifacts/ --build-temp {default_build_path()}",
             f"mkdir -p {ARTIFACT_DATA_DIFF}",
             CmdAction(datadiff_action, buffering=1),
         ],

@@ -6,7 +6,7 @@ from plumbum import cli
 import numpy as np
 from pathlib import Path
 from behavior import OperatingUnit
-from behavior.plans.utils import (
+from behavior.utils.process_pg_state_csvs import (
     process_time_pg_stats,
     process_time_pg_attribute,
     process_time_pg_class,

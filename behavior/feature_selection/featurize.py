@@ -2,7 +2,7 @@ import numpy as np
 import pandas
 
 from behavior import TARGET_COLUMNS
-from behavior.modeling.featurewiz import featurewiz as FW
+from behavior.feature_selection.featurewiz import featurewiz as FW
 
 # To prevent having any actual zeros in the training/testing data which can yield
 # Inf, we bias each observation by a small epsilon reflected below. The epsilon is

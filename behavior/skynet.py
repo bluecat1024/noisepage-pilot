@@ -97,7 +97,7 @@ class SkynetCLI(cli.Application):
             run.write("./artifacts/noisepage/psql --dbname=benchbase --command=\"VACUUM\"\n")
             run.write("./artifacts/noisepage/psql --dbname=benchbase --command=\"CHECKPOINT\"\n")
             run.write("doit noisepage_qss_install --dbname=benchbase\n")
-            run.write(f"doit behavior_pg_analyze_benchmark --benchmark={config['benchmark']}\n")
+            run.write(f"doit benchbase_pg_analyze_benchmark --benchmark={config['benchmark']}\n")
             for i in range(len(config["model_subdir"])):
                 run.write("doit behavior_eval_query \\\n")
                 run.write(f"\t--psycopg2_conn=\"host=localhost port=5432 dbname=benchbase user={config['user']}\" \\\n")

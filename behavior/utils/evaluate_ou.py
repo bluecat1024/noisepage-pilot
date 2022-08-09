@@ -6,8 +6,9 @@ from pathlib import Path
 from enum import Enum, auto, unique
 import pandas as pd
 import numpy as np
-from behavior.modeling import featurize
-from behavior.modeling.utils.prepare_data import load_input_data
+
+from behavior.feature_selection import featurize
+from behavior.utils.prepare_ou_data import load_input_data
 from sklearn.metrics import (
     mean_absolute_error,
     mean_absolute_percentage_error,

@@ -6,6 +6,8 @@ from doit.action import CmdAction
 
 import dodos.noisepage
 from dodos import VERBOSITY_DEFAULT, default_artifacts_path, default_build_path
+from behavior import BENCHDB_TO_TABLES
+from dodos.noisepage import ARTIFACT_psql
 
 ARTIFACTS_PATH = default_artifacts_path()
 BUILD_PATH = default_build_path()
@@ -194,6 +196,78 @@ def task_benchbase_run():
                 "long": "args",
                 "help": "Arguments to pass to BenchBase invocation.",
                 "default": "--create=false --load=false --execute=false",
+            },
+        ],
+    }
+
+
+def task_benchbase_pg_analyze_benchmark():
+    """
+    Behavior modeling: Run ANALYZE on all the tables in the given benchmark.
+    This updates internal statistics for estimating cardinalities and costs.
+
+    Parameters
+    ----------
+    benchmark : str
+        The benchmark whose tables should be analyzed.
+    """
+
+    def pg_analyze(benchmark):
+        if benchmark is None or benchmark not in BENCHDB_TO_TABLES:
+            print(f"Benchmark {benchmark} is not specified or does not exist.")
+            return False
+
+        for table in BENCHDB_TO_TABLES[benchmark]:
+            query = f"ANALYZE VERBOSE {table};"
+            local[str(ARTIFACT_psql)]["--dbname=benchbase"]["--command"][query]()
+
+    return {
+        "actions": [pg_analyze],
+        "file_dep": [ARTIFACT_psql],
+        "uptodate": [False],
+        "verbosity": VERBOSITY_DEFAULT,
+        "params": [
+            {
+                "name": "benchmark",
+                "long": "benchmark",
+                "help": "Benchmark whose tables should be analyzed.",
+                "default": None,
+            },
+        ],
+    }
+
+
+def task_benchbase_pg_prewarm_benchmark():
+    """
+    Behavior modeling: Run pg_prewarm() on all the tables in the given benchmark.
+    This warms the buffer pool and OS page cache.
+
+    Parameters
+    ----------
+    benchmark : str
+        The benchmark whose tables should be prewarmed.
+    """
+
+    def pg_prewarm(benchmark):
+        if benchmark is None or benchmark not in BENCHDB_TO_TABLES:
+            print(f"Benchmark {benchmark} is not specified or does not exist.")
+            return False
+
+        for table in BENCHDB_TO_TABLES[benchmark]:
+            query = f"SELECT * FROM pg_prewarm('{table}');"
+            local[str(ARTIFACT_psql)]["--dbname=benchbase"]["--command"][query]()
+
+    return {
+        "actions": [pg_prewarm],
+        "file_dep": [ARTIFACT_psql],
+        "uptodate": [False],
+        "verbosity": VERBOSITY_DEFAULT,
+        "params": [
+            {
+                "name": "benchmark",
+                "long": "benchmark",
+                "help": "Benchmark whose tables should be analyzed.",
+                "default": None,
             },
         ],
     }

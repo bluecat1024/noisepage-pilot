@@ -16,10 +16,10 @@ from plumbum import cli
 from sklearn import tree
 
 from behavior import TARGET_COLUMNS, OperatingUnit, Targets, DERIVED_FEATURES_MAP
-from behavior.modeling import featurize
-from behavior.modeling.utils.prepare_data import load_input_data
-from behavior.modeling.utils.evaluate_ou import evaluate_ou_model
-from behavior.modeling.model import BehaviorModel
+from behavior.feature_selection import featurize
+from behavior.utils.prepare_ou_data import load_input_data
+from behavior.utils.evaluate_ou import evaluate_ou_model
+from behavior.model_ous.model import BehaviorModel
 
 logger = logging.getLogger(__name__)
 

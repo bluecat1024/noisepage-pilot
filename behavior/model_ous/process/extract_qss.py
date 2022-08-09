@@ -13,7 +13,7 @@ from plumbum import cli
 from tqdm import tqdm
 
 from behavior import OperatingUnit, TARGET_COLUMNS, DERIVED_FEATURES_MAP
-from behavior.plans import PLAN_INDEPENDENT_ID, UNIQUE_QUERY_ID_INDEX, QSS_PLANS_IGNORE_NODE_FEATURES, QSS_MERGE_PLAN_KEY
+from behavior.model_ous.process import PLAN_INDEPENDENT_ID, UNIQUE_QUERY_ID_INDEX, QSS_PLANS_IGNORE_NODE_FEATURES, QSS_MERGE_PLAN_KEY
 
 logger = logging.getLogger(__name__)
 

@@ -19,11 +19,12 @@ from pathlib import Path
 from plumbum import cli
 
 from behavior import OperatingUnit, Targets, BENCHDB_TO_TABLES
-from behavior.modeling.utils.evaluate_ou import evaluate_ou_model
-from behavior.modeling.utils.postgres import prepare_augmentation_data, prepare_pg_inference_state
-from behavior.modeling.utils.prepare_data import purify_index_input_data, prepare_inference_query_stream
-from behavior.modeling.utils.postgres_model_plan import generate_vacuum_partition, generate_query_ous, estimate_query_modifications
-from behavior.plans.utils import (
+from behavior.utils.evaluate_ou import evaluate_ou_model
+from behavior.utils.prepare_ou_data import purify_index_input_data
+from behavior.model_query.utils.postgres import prepare_augmentation_data, prepare_pg_inference_state
+from behavior.model_query.utils.prepare_data import prepare_inference_query_stream
+from behavior.model_query.utils.postgres_model_plan import generate_vacuum_partition, generate_query_ous, estimate_query_modifications
+from behavior.utils.process_pg_state_csvs import (
     process_time_pg_stats,
     process_time_pg_attribute,
     process_time_pg_index,
