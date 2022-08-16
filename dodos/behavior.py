@@ -13,6 +13,7 @@ from dodos.noisepage import (
     ARTIFACT_pgdata,
     ARTIFACT_psql,
 )
+from behavior import BENCHDB_TO_TABLES
 
 ARTIFACTS_PATH = default_artifacts_path()
 BUILD_PATH = default_build_path()
@@ -32,6 +33,7 @@ ARTIFACT_DATA_MERGE = ARTIFACTS_PATH / "data/merge"
 ARTIFACT_MODELS = ARTIFACTS_PATH / "models"
 ARTIFACT_EVALS_OU = ARTIFACTS_PATH / "evals_ou"
 ARTIFACT_EVALS_QUERY = ARTIFACTS_PATH / "evals_query"
+ARTIFACT_EVALS_QUERY_WORKLOAD = ARTIFACTS_PATH / "evals_query_workload"
 
 
 def task_behavior_skynet():
@@ -451,6 +453,89 @@ def task_behavior_eval_query():
     }
 
 
+def task_behavior_eval_query_workload():
+    """
+    Behavior modeling: perform query-level model analysis using a workload model.
+    """
+    def eval_cmd(benchmark, session_sql, eval_raw_data, base_models, workload_model, psycopg2_conn, slice_window):
+        if base_models is None:
+            # Find the latest experiment by last modified timestamp.
+            experiment_list = sorted((exp_path for exp_path in ARTIFACT_MODELS.glob("*")), key=os.path.getmtime)
+            assert len(experiment_list) > 0, "No experiments found."
+            base_models = experiment_list[-1] / "gbm_l2"
+
+        assert benchmark in BENCHDB_TO_TABLES, "Unknwon benchmark specified."
+        assert eval_raw_data is not None, "No path to experiment data specified."
+        assert os.path.isdir(base_models), f"Specified path {base_models} is not a valid directory."
+        assert psycopg2_conn is not None, "No Psycopg2 connection string is specified."
+
+        eval_args = (
+            f"--benchmark {benchmark} "
+            f"--dir-data {eval_raw_data} "
+            f"--dir-base-models {base_models} "
+            f"--dir-workload-model {workload_model} "
+            f"--dir-evals-output {ARTIFACT_EVALS_QUERY_WORKLOAD} "
+            f"--psycopg2-conn \"{psycopg2_conn}\" "
+            f"--slice-window {slice_window} "
+        )
+
+        if session_sql is not None:
+            eval_args = eval_args + f"--session-sql {session_sql} "
+
+        return f"python3 -m behavior eval_query_workload {eval_args}"
+
+    return {
+        "actions": [f"mkdir -p {ARTIFACT_EVALS_QUERY_WORKLOAD}", CmdAction(eval_cmd, buffering=1)],
+        "targets": [ARTIFACT_EVALS_QUERY_WORKLOAD],
+        "verbosity": VERBOSITY_DEFAULT,
+        "uptodate": [False],
+        "params": [
+            {
+                "name": "benchmark",
+                "long": "benchmark",
+                "help": "Benchmark that is being evaluated.",
+                "default": None,
+            },
+            {
+                "name": "session_sql",
+                "long": "session_sql",
+                "help": "Path to a list of SQL statements that should be executed in the session prior to EXPLAIN.",
+                "default": None,
+            },
+            {
+                "name": "eval_raw_data",
+                "long": "eval_raw_data",
+                "help": "Path to root folder containing the RAW data for evaluation purposes.",
+                "default": None,
+            },
+            {
+                "name": "base_models",
+                "long": "base_models",
+                "help": "Path to folder containing models for the base case. Defaults to gbm_l2 of last trained models.",
+                "default": None,
+            },
+            {
+                "name": "workload_model",
+                "long": "workload_model",
+                "help": "Path to folder containing the workload model.",
+                "default": None,
+            },
+            {
+                "name": "psycopg2_conn",
+                "long": "psycopg2_conn",
+                "help": "psycopg2 connection string to connect to the valid database instance.",
+                "default": None,
+            },
+            {
+                "name": "slice_window",
+                "long": "slice_window",
+                "help": "Slice of the window that should be processed.",
+                "default": None,
+            },
+        ],
+    }
+
+
 def task_behavior_eval_query_plots():
     """
     Behavior modeling: generate plots from eval_query analysis.
@@ -461,6 +546,24 @@ def task_behavior_eval_query_plots():
         )
 
         return f"python3 -m behavior eval_query_plots {eval_args}"
+
+    return {
+        "actions": [CmdAction(eval_cmd, buffering=1)],
+        "verbosity": VERBOSITY_DEFAULT,
+        "uptodate": [False],
+    }
+
+
+def task_behavior_eval_query_workload_plots():
+    """
+    Behavior modeling: generate plots from eval_query_workload analysis.
+    """
+    def eval_cmd():
+        eval_args = (
+            f"--dir-input {ARTIFACT_EVALS_QUERY_WORKLOAD} "
+        )
+
+        return f"python3 -m behavior eval_query_workload_plots {eval_args}"
 
     return {
         "actions": [CmdAction(eval_cmd, buffering=1)],
