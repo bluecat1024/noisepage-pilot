@@ -29,20 +29,21 @@ datagen:
     dump_db_path: null
     # Whether to enable the userspace collector.
     enable_collector: True
+    # Whether to snapshot the data at the start right after LOAD.
+    snapshot_data: False
     # Default options that will (default) apply to all runs. Can be overriden.
     default_options:
       - qss_capture_enabled = ON
       - qss_capture_nested = ON
       - qss_capture_exec_stats = ON
       - qss_output_noisepage = ON
+      - qss_capture_abort = ON
 
     runs:
       # Options that describe each run. These arrays must have the same length.
       - terminals: 1
         works.work.rate: unlimited
         works.work.time: 60
-        # Requires continuous = True. This SQL file is executed after every run and prior to the
-        # next run. This cannot be NULL if continuous = True but can point to a file with no commands.
         post_execute_sql: null
         # Specifying this requires continuous = False since that requires restarting the database.
         # If continuous = True, these options for subsequent runs are not honored.

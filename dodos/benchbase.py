@@ -4,6 +4,7 @@ from plumbum import local
 
 import doit
 from doit.action import CmdAction
+from plumbum import local
 
 import dodos.noisepage
 from dodos import VERBOSITY_DEFAULT, default_artifacts_path, default_build_path
@@ -232,6 +233,42 @@ def task_benchbase_pg_analyze_benchmark():
                 "name": "benchmark",
                 "long": "benchmark",
                 "help": "Benchmark whose tables should be analyzed.",
+                "default": None,
+            },
+        ],
+    }
+
+
+def task_benchbase_snapshot_benchmark():
+    """
+    BenchBase: snapshot all tables of a particular benchmark.
+    """
+
+    def snapshot(benchmark, output_dir):
+        if benchmark is None or benchmark not in BENCHDB_TO_TABLES:
+            print(f"Benchmark {benchmark} is not specified or does not exist.")
+            return False
+
+        for table in BENCHDB_TO_TABLES[benchmark]:
+            query = f"\COPY (SELECT * FROM {table}) TO '{output_dir}/{table}_snapshot.csv' CSV HEADER;"
+            local[str(ARTIFACT_psql)]["--dbname=benchbase"]["--command"][query]()
+
+    return {
+        "actions": [snapshot],
+        "file_dep": [ARTIFACT_psql],
+        "uptodate": [False],
+        "verbosity": VERBOSITY_DEFAULT,
+        "params": [
+            {
+                "name": "benchmark",
+                "long": "benchmark",
+                "help": "Benchmark whose tables should be snapshot.",
+                "default": None,
+            },
+            {
+                "name": "output_dir",
+                "long": "output_dir",
+                "help": "Output directory that snapshots should be written to.",
                 "default": None,
             },
         ],

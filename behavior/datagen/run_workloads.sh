@@ -209,6 +209,11 @@ for workload in "${workload_directory}"/*; do
                     fi
                 fi
 
+                if [ "$snapshot_data" == 'True' ];
+                then
+                    doit benchbase_snapshot_benchmark --benchmark="${benchmark}" --output_dir="${benchmark_output}"
+                fi
+
                 # Remove existing logfiles, if any exist.
                 doit noisepage_stop --data="${PGDATA_LOCATION}"
                 rm -rf "${PGDATA_LOCATION}/log/*.csv"
@@ -282,15 +287,18 @@ for workload in "${workload_directory}"/*; do
                 ${psql} --dbname=benchbase --csv --command="SELECT * FROM pg_catalog.pg_qss_stats ORDER BY statement_timestamp;" > "${stats_file}"
             fi
 
+            if [ ! -z "$post_execute" ];
+            then
+                postexecute_path=$(realpath "${post_execute[$i]}")
+                ${psql} --dbname=benchbase -f "${postexecute_path}"
+            fi
+
             # Similarly, we move the postgres log file to the experiment output directory if it
             # exists. The log file is also suffixed by this benchmark index.
             log=${PGDATA_LOCATION}/log
             if [ "${continuous}" != 'True' ];
             then
                 doit noisepage_stop --data="${PGDATA_LOCATION}"
-            else
-                postexecute_path=$(realpath "${post_execute[$i]}")
-                ${psql} --dbname=benchbase -f "${postexecute_path}"
             fi
 
             if [ -d "${log}" ] && [ "${continuous}" != 'True' ];

@@ -86,6 +86,7 @@ def generate_workload(config, mode_dir, benchbase_path, postgresql_config_file):
         "pg_analyze": config["pg_analyze"],
         "pg_prewarm": config["pg_prewarm"],
         "continuous": config["continuous"],
+        "snapshot_data": config["snapshot_data"],
         "pg_configs": pg_configs,
         "benchbase_configs": benchbase_configs,
         "dump_db": config["dump_db"],
