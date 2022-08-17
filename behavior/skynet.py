@@ -110,6 +110,69 @@ class SkynetCLI(cli.Application):
                 run.write("\n")
         run.write(("#" if not self.config["eval_query_plots"] else "") + "doit behavior_eval_query_plots\n")
 
+    def output_workload_train(self, run):
+        run.write("\n")
+        run.write("#############################\n")
+        run.write("# Train Workload Model\n")
+        run.write("#############################\n")
+        run.write(("#" if len(self.config["train_workload_models"]) == 0 else "") + "rm -rf artifacts/workload_analysis/workload_models/*\n")
+        for config in self.config["train_workload_models"]:
+            benchmarks = ",".join([c[1] for c in config["inputs"]])
+            inputs = ",".join([f"artifacts/behavior/data/raw/experiment/{c[0]}" for c in config["inputs"]])
+            input_train = ",".join([f"artifacts/behavior/data/raw/experiment/{c[0]}/train/*.feather" for c in config["inputs"]])
+            epochs = config["epochs"]
+            separate = config["separate"]
+            batch_size = config["batch_size"]
+            hidden_size = config["hidden_size"]
+            output = config["output"]
+
+            run.write(f"doit workload_analyze --input_workload={inputs} --output_workload={inputs} --benchmark={benchmarks} --workload_only=False\n")
+            run.write(f"doit workload_populate_data --input_workload={inputs} --output_workload={inputs} --benchmark={benchmarks} --workload_only=False\n")
+            run.write(f"doit workload_windowize --input_workload={inputs} --output_workload={inputs} --benchmark={benchmarks}\n")
+            run.write(f"doit workload_prepare_train --input_workload={inputs} --output_workload={inputs} --benchmark={benchmarks}\n")
+            run.write(f"doit workload_train --input_data={input_train} --output_dir={output} --epochs={epochs} --batch_size={batch_size} --hidden_size={hidden_size} --separate={separate}\n")
+            run.write("\n")
+
+    def output_eval_query_workload(self, run):
+        run.write("\n")
+        run.write("#############################\n")
+        run.write("# Evaluate Query Workload Model\n")
+        run.write("#############################\n")
+        run.write(("#" if len(self.config["eval_query_workload"]) == 0 else "") + "rm -rf artifacts/behavior/evals_query_workload/*\n")
+        for config in self.config["eval_query_workload"]:
+            run.write("sudo pkill postgres || true\n")
+            run.write("rm -rf /tmp/eval_query_workload_scratch/\n")
+            run.write(f"doit noisepage_init --config={os.getcwd()}/{config['pg_conf_path']}\n")
+            run.write("doit benchbase_bootstrap_dbms\n")
+            run.write(f"./artifacts/noisepage/pg_restore -j 8 -d benchbase {config['restore_db_path']}\n")
+            run.write("./artifacts/noisepage/psql --dbname=benchbase --command=\"VACUUM\"\n")
+            run.write("./artifacts/noisepage/psql --dbname=benchbase --command=\"CHECKPOINT\"\n")
+            run.write("doit noisepage_qss_install --dbname=benchbase\n")
+            run.write(f"doit benchbase_pg_analyze_benchmark --benchmark={config['benchmark']}\n")
+
+            conn = f"--psycopg2_conn=\"host=localhost port=5432 dbname=benchbase user={config['user']}\""
+            inputs = f"artifacts/behavior/data/raw/experiment/{config['raw_data']}"
+            benchmarks = config["benchmark"]
+            run.write(f"doit workload_analyze --input_workload={inputs} --output_workload={inputs} --benchmark={benchmarks} --workload_only=True {conn}\n")
+            run.write(f"doit workload_populate_data --input_workload={inputs} --output_workload={inputs} --benchmark={benchmarks} --workload_only=True {conn}\n")
+
+            run.write("doit behavior_eval_query_workload \\\n")
+            run.write(f"\t--benchmark={benchmarks} \\\n")
+            run.write(f"\t--session_sql={config['session_path']} \\\n")
+            run.write(f"\t--eval_raw_data={inputs} \\\n")
+            run.write(f"\t--base_models=artifacts/behavior/models/{config['model_subdir']}\n")
+            run.write(f"\t--workload_model=artifacts/workload_analysis/workload_models/{config['workload_model']}\n")
+            run.write(f"\t{conn} \\\n")
+            run.write(f"\t--slice_window={config['slice_window']} \\\n")
+
+            run.write(f"mv artifacts/behavior/evals_query_workload/eval_* artifacts/behavior/evals_query_workload/{config['output_paths']}\n")
+            if config["preserve_scratch"]:
+                run.write(f"mv /tmp/eval_query_workload_scratch ~/npp/artifacts/behavior/evals_query_workload/{config['output_paths']}/\n")
+            else:
+                run.write(f"rm -rf /tmp/eval_query_workload_scratch\n")
+            run.write("\n")
+        run.write(("#" if not self.config["eval_query_workload_plots"] else "") + "doit behavior_eval_query_workload_plots\n")
+
     def main(self):
         config_path = Path(self.config_file)
         with config_path.open("r", encoding="utf-8") as f:
@@ -123,6 +186,8 @@ class SkynetCLI(cli.Application):
             self.output_train(run)
             self.output_eval_ou(run)
             self.output_eval_query(run)
+            self.output_workload_train(run)
+            self.output_eval_query_workload(run)
 
             run.write("\n")
             run.write("#############################\n")
@@ -134,12 +199,19 @@ class SkynetCLI(cli.Application):
             run.write(("#" if not self.config["zip_models"] else "") + "tar zcf models.tgz models\n")
             run.write(("#" if not self.config["zip_evals_ou"] else "") + "tar zcf evals_ou.tgz evals_ou\n")
             run.write(("#" if not self.config["zip_eval_query"] else "") + "tar zcf evals_query.tgz evals_query\n")
+            run.write(("#" if not self.config["zip_eval_query_workload"] else "") + "tar zcf evals_query_workload.tgz evals_query_workload\n")
             run.write(("#" if not self.config["zip_eval_query_plots"] else "") + "tar zcf evals_query_plots.tgz evals_query/*/*/plots\n")
+            run.write(("#" if not self.config["zip_eval_query_workload_plots"] else "") + "tar zcf evals_query_workload_plots.tgz evals_query_workload/*/plots\n")
             run.write(("#" if not self.config["zip_data"] else "") + f"mv data.tgz {self.config['output_path']}\n")
             run.write(("#" if not self.config["zip_models"] else "") + f"mv models.tgz {self.config['output_path']}\n")
             run.write(("#" if not self.config["zip_evals_ou"] else "") + f"mv evals_ou.tgz {self.config['output_path']}\n")
             run.write(("#" if not self.config["zip_eval_query"] else "") + f"mv evals_query.tgz {self.config['output_path']}\n")
+            run.write(("#" if not self.config["zip_eval_query_workload"] else "") + f"mv evals_query_workload.tgz {self.config['output_path']}\n")
             run.write(("#" if not self.config["zip_eval_query_plots"] else "") + f"mv evals_query_plots.tgz {self.config['output_path']}\n")
+            run.write(("#" if not self.config["zip_eval_query_workload_plots"] else "") + f"mv evals_query_workload_plots.tgz {self.config['output_path']}\n")
+            run.write("cd artifacts/workload_analysis\n")
+            run.write(("#" if not self.config["zip_workload_models"] else "") + "tar zcf workload_models.tgz workload_models\n")
+            run.write(("#" if not self.config["zip_workload_models"] else "") + f"mv workload_models.tgz {self.config['output_path']}\n")
             run.write("cd ../../\n")
 
 

@@ -112,58 +112,64 @@ def augment_ous(scratch_it, sliced_metadata, conn):
     open(scratch_it / "augment_query_ous", "w").close()
 
 
-def evaluate_query_plans(base_models, scratch_it, queries, output_path):
+def evaluate_query_plans(eval_batch_size, base_models, scratch_it, queries, output_path):
     # Evaluate all the OUs.
     for ou in OperatingUnit:
         ou_type = ou.name
-        files = sorted(glob.glob(f"{scratch_it}/AUG_{ou.name}.feather.*"))
+        key_fn = lambda x: int(x.split(".")[-1])
+        files = sorted(glob.glob(f"{scratch_it}/AUG_{ou.name}.feather.*"), key=key_fn)
+        if len(files) == 0:
+            files = sorted(glob.glob(f"{scratch_it}/{ou.name}.feather.*"), key=key_fn)
+
+        if len(files) == 0:
+            # This case is no data for the OU.
+            continue
+
         def logged_read_feather(target):
             logger.info("[^]: [LOAD] Input %s", target)
             return pd.read_feather(target)
 
-        if len(files) > 0:
-            df = pd.concat(map(logged_read_feather, files))
+        (output_path / ou_type).mkdir(parents=True, exist_ok=True)
+        eval_slices = [files[x:x+eval_batch_size] for x in range(0, len(files), eval_batch_size)]
+        for i, eval_slice in enumerate(eval_slices):
+            df = pd.concat(map(logged_read_feather, eval_slice))
             df.reset_index(drop=True, inplace=True)
-        else:
-            files = sorted(glob.glob(f"{scratch_it}/{ou.name}.feather.*"))
-            if len(files) > 0:
-                df = pd.concat(map(logged_read_feather, files))
-                df.reset_index(drop=True, inplace=True)
+
+            if ou_type not in base_models:
+                # If we don't have the model for the particular OU, we just predict 0.
+                df["pred_elapsed_us"] = 0
+                # Set a bit in [error_missing_model]
+                df["error_missing_model"] = 1
             else:
-                # This OU has no data.
-                continue
+                df = evaluate_ou_model(base_models[ou_type], None, None, eval_df=df, return_df=True, output=False)
+                df["error_missing_model"] = 0
 
-        if ou_type not in base_models:
-            # If we don't have the model for the particular OU, we just predict 0.
-            df["pred_elapsed_us"] = 0
-            # Set a bit in [error_missing_model]
-            df["error_missing_model"] = 1
-        else:
-            df = evaluate_ou_model(base_models[ou_type], None, None, eval_df=df, return_df=True, output=False)
-            df["error_missing_model"] = 0
+                if OperatingUnit[ou_type] == OperatingUnit.IndexOnlyScan or OperatingUnit[ou_type] == OperatingUnit.IndexScan:
+                    prefix = "IndexOnlyScan" if OperatingUnit[ou_type] == OperatingUnit.IndexOnlyScan else "IndexScan"
+                    df["pred_elapsed_us"] = df.pred_elapsed_us * df[f"{prefix}_num_outer_loops"]
 
-        if OperatingUnit[ou_type] == OperatingUnit.IndexOnlyScan or OperatingUnit[ou_type] == OperatingUnit.IndexScan:
-            # TODO(wz2): Assume each other loop executes with the same latency.
-            prefix = "IndexOnlyScan" if OperatingUnit[ou_type] == OperatingUnit.IndexOnlyScan else "IndexScan"
-            df["pred_elapsed_us"] = df.pred_elapsed_us * df[f"{prefix}_num_outer_loops"]
-
-        df.to_feather(output_path / f"{ou_type}_evals.feather")
+            df.to_feather(output_path / ou_type / f"{ou_type}_evals_{i}.feather")
 
     # Massage the frames together from disk to combat OOM.
     unified_df = None
+    glob_files = []
     for ou in OperatingUnit:
         ou_type = ou.name
-        if (output_path / f"{ou_type}_evals.feather").exists():
-            logger.info("Reading %s", ou_type)
-            df = pd.read_feather(output_path / f"{ou_type}_evals.feather")
-            keep_columns = ["query_id", "query_order", "pred_elapsed_us", "error_missing_model"]
-            df.drop(columns=[col for col in df.columns if col not in keep_columns], inplace=True)
-            if unified_df is None:
-                unified_df = df
-            else:
-                unified_df = pd.concat([unified_df, df], ignore_index=True).groupby(["query_id", "query_order"]).sum()
-                unified_df.reset_index(drop=False, inplace=True)
-            gc.collect()
+        glob_files.extend(glob.glob(f"{output_path}/{ou_type}/{ou_type}_*.feather"))
+
+    assert len(glob_files) > 0
+    key = lambda x: int(x.split(".feather")[0].split("_")[-1])
+    glob_files = sorted(glob_files, key=key)
+    for ou_file in glob_files:
+        logger.info("[^]: [MASSAGE] Input %s", ou_file)
+        keep_columns = ["query_id", "query_order", "pred_elapsed_us", "error_missing_model"]
+        df = pd.read_feather(ou_file, columns=keep_columns)
+        if unified_df is None:
+            unified_df = df
+        else:
+            unified_df = pd.concat([unified_df, df], ignore_index=True).groupby(["query_id", "query_order"]).sum()
+            unified_df.reset_index(drop=False, inplace=True)
+        gc.collect()
 
     assert unified_df is not None
     unified_df.sort_values(by=["query_order"], inplace=True, ignore_index=True)
@@ -310,6 +316,13 @@ def augment_single_ou(conn, ous, query, idxoid_table_map, tableoid_map, metadata
                 return get_key("plan_plan_rows", target_ou)
         assert False, f"Could not find plan node with {plan_id}"
 
+    def exist_ou_with_child_plan_id(ou, plan_id):
+        for target_ou in ous:
+            ou_type = OperatingUnit[target_ou["node_type"]]
+            if ou == ou_type and (target_ou["left_child_node_id"] == plan_id or target_ou["right_child_node_id"] == plan_id):
+                return target_ou
+        return None
+
     new_ous = []
     def gen_idx_inserts(ou):
         addt_ous = []
@@ -320,10 +333,10 @@ def augment_single_ou(conn, ous, query, idxoid_table_map, tableoid_map, metadata
             if not "inserts" in idx_metadata:
                 idx_metadata["inserts"] = 0
             idx_metadata["inserts"] = idx_metadata["inserts"] + 1
-
             split = (idx_metadata["inserts"] % (keys_per_page / 2)) == 0
 
             # FIXME(INDEX): Need to use an index learned percentage here.
+            # We currently assume we split but don't extend relation.
             addt_ous.append({
                 'node_type': OperatingUnit.ModifyTableIndexInsert.name,
                 'ModifyTableIndexInsert_indexid': idxoid,
@@ -341,8 +354,16 @@ def augment_single_ou(conn, ous, query, idxoid_table_map, tableoid_map, metadata
         if ou_type == OperatingUnit.IndexOnlyScan or ou_type == OperatingUnit.IndexScan:
             prefix = "IndexOnlyScan" if ou_type == OperatingUnit.IndexOnlyScan else "IndexScan"
             tbl = idxoid_table_map[ou[prefix + "_indexid"]]
-            ou[f"{prefix}_num_iterator_used"] = get_key("plan_rows", ou) if query is None or np.isnan(getattr(query, f"{tbl}_pk_output")) else getattr(query, f"{tbl}_pk_output")
             ou[f"{prefix}_num_outer_loops"] = 1.0
+
+            limit_ou = exist_ou_with_child_plan_id(OperatingUnit.Limit, ou["plan_node_id"])
+            if limit_ou is not None:
+                # In the case where there is a LIMIT directly above us, only fetch the Limit.
+                ou[f"{prefix}_num_iterator_used"] = get_key("plan_rows", limit_ou)
+            elif query is None or np.isnan(getattr(query, f"{tbl}_pk_output")):
+                ou[f"{prefix}_num_iterator_used"] = get_key("plan_rows", ou)
+            else:
+                ou[f"{prefix}_num_iterator_used"] = getattr(query, f"{tbl}_pk_output")
             ou[f"{prefix}_num_defrag"] = int(random.uniform(0, 1) <= (percents[tbl]["defrag_percent"] * ou[f"{prefix}_num_iterator_used"]))
         elif ou_type == OperatingUnit.Agg:
             # The number of input rows is the number of rows output by the child.
@@ -402,8 +423,8 @@ def augment_single_ou(conn, ous, query, idxoid_table_map, tableoid_map, metadata
             prefix = "IndexOnlyScan" if ou_type == OperatingUnit.IndexOnlyScan else "IndexScan"
             for other_ou in ous:
                 if other_ou["node_type"] == OperatingUnit.NestLoop.name and other_ou["right_child_node_id"] == ou["plan_node_id"]:
-                    # We don't mutate num_iterator_used because num_iterator_used is already set to the "per-iteration".
                     ou[f"{prefix}_num_outer_loops"] = get_plan_rows_matching_plan_id(other_ou["left_child_node_id"])
+                    ou[f"{prefix}_num_iterator_used"] = max(1.0, ou[f"{prefix}_num_iterator_used"] / ou[f"{prefix}_num_outer_loops"])
                     break
         elif ou_type == OperatingUnit.NestLoop:
             # Number of outer rows is the rows output by the left plan child.
@@ -600,7 +621,7 @@ def slice_windows(conn, input_dir, slice_window, TABLES, table_attr_map, table_k
     return window_stats
 
 
-def main(benchmark, psycopg2_conn, session_sql, dir_models, dir_workload_model, dir_data, slice_window, dir_evals_output, dir_scratch):
+def main(benchmark, psycopg2_conn, session_sql, dir_models, dir_workload_model, dir_data, slice_window, dir_evals_output, dir_scratch, eval_batch_size):
     TABLES = BENCHDB_TO_TABLES[benchmark]
 
     # Load the models
@@ -609,18 +630,14 @@ def main(benchmark, psycopg2_conn, session_sql, dir_models, dir_workload_model, 
     # FIXME(HACK): Loading all the fillfactor models independently.
     workload_models = {}
     ff10 = WorkloadModel()
-    ff10.load(f"{dir_workload_model}/ff10_epochs10000")
+    ff10.load(f"{dir_workload_model}/ff10_sep_epochs10000")
     ff50 = WorkloadModel()
-    ff50.load(f"{dir_workload_model}/ff50_epochs10000")
+    ff50.load(f"{dir_workload_model}/ff50_sep_epochs10000")
     ff100 = WorkloadModel()
-    ff100.load(f"{dir_workload_model}/ff100_epochs10000")
+    ff100.load(f"{dir_workload_model}/ff100_sep_epochs10000")
     workload_models["10"] = ff10
     workload_models["50"] = ff50
     workload_models["100"] = ff100
-
-    eval_timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    base_output = dir_evals_output / f"eval_{eval_timestamp}"
-    base_output.mkdir(parents=True, exist_ok=True)
 
     # Scratch space is used to try and reduce debugging overhead.
     scratch = dir_scratch / "eval_query_workload_scratch"
@@ -668,7 +685,11 @@ def main(benchmark, psycopg2_conn, session_sql, dir_models, dir_workload_model, 
                 df.loc[empty_target[mask].index, "modify_target"] = tbl
             return df
         df = pd.concat(map(read, chunk_files), ignore_index=True, axis=0)
-        evaluate_query_plans(base_models, scratch / "ous", df, base_output)
+
+        eval_timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        base_output = dir_evals_output / f"eval_{eval_timestamp}"
+        base_output.mkdir(parents=True, exist_ok=True)
+        evaluate_query_plans(eval_batch_size, base_models, scratch / "ous", df, base_output)
 
 
 class EvalQueryWorkloadCLI(cli.Application):
@@ -726,6 +747,13 @@ class EvalQueryWorkloadCLI(cli.Application):
         mandatory=True,
         help="Size of the window slice that should be used.",
     )
+    eval_batch_size = cli.SwitchAttr(
+        "--eval-batch-size",
+        int,
+        default=4,
+        help="Number of OU files to evaluate in a batch.",
+    )
+
 
     def main(self):
         main(self.benchmark,
@@ -736,7 +764,8 @@ class EvalQueryWorkloadCLI(cli.Application):
              self.dir_data,
              self.slice_window,
              self.dir_evals_output,
-             self.dir_scratch)
+             self.dir_scratch,
+             self.eval_batch_size)
 
 
 if __name__ == "__main__":

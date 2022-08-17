@@ -70,11 +70,13 @@ def generate_predicted_query_error(query_stream, dir_output, min_error_threshold
     labels = []
     fig, axes = plt.subplots(2, 1, figsize=(12.8, 7.2))
 
+    txtout = open(dir_output / "select_error.txt", "w")
     frame = query_stream[(query_stream.OP == "SELECT")]
     for group in frame.groupby(by=["modify_target"]):
         ticks.append(x)
         labels.append(group[0])
 
+        txtout.write(f"{group[0]}\n")
         qgroups = group[1].groupby(by=["query_id"]).sum()
         colors = plt.cm.BuPu(np.linspace(0.25, 1.0, len(qgroups)))
 
@@ -87,10 +89,12 @@ def generate_predicted_query_error(query_stream, dir_output, min_error_threshold
 
                 rect = axes[1].bar(x, qgroup.elapsed_us / qgroup.cnt, width=width, color=colors[idx])[0]
                 axes[1].text(rect.get_x() + rect.get_width() / 2., 1.05 * rect.get_height(), '%d' % (qgroup.elapsed_us / qgroup.cnt), ha='center', va='bottom')
+                txtout.write(f"{qgroup.Index} avg. predicted/true: {error} / {qgroup.elapsed_us / qgroup.cnt}\n")
 
                 x += width
                 idx += 1
 
+        txtout.write("\n")
         x += 1
 
     axes[0].set_ylabel("Avg. Absolute Error (sum(|pred-elapsed|) / cnt)")
@@ -102,6 +106,7 @@ def generate_predicted_query_error(query_stream, dir_output, min_error_threshold
     axes[1].set_xticklabels(labels, fontdict=None, minor=False)
     plt.savefig(dir_output / "summary_select.png")
     plt.close()
+    txtout.close()
 
 
 def generate_predicted_query_error_modify(query_stream, dir_output):
@@ -110,6 +115,7 @@ def generate_predicted_query_error_modify(query_stream, dir_output):
     ticks = []
     labels = []
     fig, axes = plt.subplots(2, 1, figsize=(12.8, 7.2))
+    txtout = open(dir_output / "modify_error.txt", "w")
 
     frame = query_stream[(query_stream.OP != "SELECT")]
     for group in frame.groupby(by=["modify_target"]):
@@ -117,7 +123,14 @@ def generate_predicted_query_error_modify(query_stream, dir_output):
         labels.append(group[0])
         colors = plt.cm.BuPu(np.linspace(0.25, 1.0, 3))
         idx = 0
-        for subframe in [group[1][group[1].OP == "INSERT"], group[1][group[1].OP == "UPDATE"], group[1][group[1].OP == "DELETE"]]:
+        for t, subframe in enumerate([group[1][group[1].OP == "INSERT"], group[1][group[1].OP == "UPDATE"], group[1][group[1].OP == "DELETE"]]):
+            if t == 0:
+                txtout.write(f"{group[0]} INSERT\n")
+            elif t == 1:
+                txtout.write(f"{group[0]} UPDATE\n")
+            else:
+                txtout.write(f"{group[0]} DELETE\n")
+
             qgroups = subframe.groupby(by=["query_id"]).sum()
             for qgroup in qgroups.itertuples():
                 error = qgroup.abs_diff / qgroup.cnt
@@ -126,10 +139,12 @@ def generate_predicted_query_error_modify(query_stream, dir_output):
 
                 rect = axes[1].bar(x, qgroup.elapsed_us / qgroup.cnt, width=width, color=colors[idx])[0]
                 axes[1].text(rect.get_x() + rect.get_width() / 2., 1.05 * rect.get_height(), '%d' % (qgroup.elapsed_us / qgroup.cnt), ha='center', va='bottom')
+                txtout.write(f"{qgroup.Index} avg. predicted/true: {error} / {qgroup.elapsed_us / qgroup.cnt}\n")
                 x += width
 
             idx += 1
 
+        txtout.write("\n")
         x += 1
 
     axes[0].set_ylabel("Avg. Absolute Error (sum(|pred-elapsed|) / cnt)")
@@ -141,6 +156,7 @@ def generate_predicted_query_error_modify(query_stream, dir_output):
     axes[1].set_xticklabels(labels, fontdict=None, minor=False)
     plt.savefig(dir_output / "summary_modification.png")
     plt.close()
+    txtout.close()
 
 
 def main(dir_input):
