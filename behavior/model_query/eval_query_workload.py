@@ -1,4 +1,5 @@
 import random
+import pglast
 from tqdm import tqdm
 import logging
 import glob
@@ -162,12 +163,12 @@ def evaluate_query_plans(eval_batch_size, base_models, scratch_it, queries, outp
     glob_files = sorted(glob_files, key=key)
     for ou_file in glob_files:
         logger.info("[^]: [MASSAGE] Input %s", ou_file)
-        keep_columns = ["query_id", "query_order", "pred_elapsed_us", "error_missing_model"]
+        keep_columns = ["query_id", "query_order", "PLOT_TS", "pred_elapsed_us", "error_missing_model"]
         df = pd.read_feather(ou_file, columns=keep_columns)
         if unified_df is None:
             unified_df = df
         else:
-            unified_df = pd.concat([unified_df, df], ignore_index=True).groupby(["query_id", "query_order"]).sum()
+            unified_df = pd.concat([unified_df, df], ignore_index=True).groupby(["query_id", "query_order", "PLOT_TS"]).sum()
             unified_df.reset_index(drop=False, inplace=True)
         gc.collect()
 
@@ -175,6 +176,8 @@ def evaluate_query_plans(eval_batch_size, base_models, scratch_it, queries, outp
     unified_df.sort_values(by=["query_order"], inplace=True, ignore_index=True)
 
     unified_df.set_index(keys=["query_id", "query_order"], inplace=True)
+    assert unified_df.index.is_unique
+
     queries.set_index(keys=["query_id", "query_order"], inplace=True)
     queries = queries.join(unified_df, how="inner")
     queries.reset_index(drop=False, inplace=True)
@@ -336,16 +339,13 @@ def augment_single_ou(conn, ous, query, idxoid_table_map, tableoid_map, metadata
             split = (idx_metadata["inserts"] % (keys_per_page / 2)) == 0
 
             # FIXME(INDEX): Need to use an index learned percentage here.
-            # We currently assume we split but don't extend relation.
             addt_ous.append({
                 'node_type': OperatingUnit.ModifyTableIndexInsert.name,
                 'ModifyTableIndexInsert_indexid': idxoid,
                 'plan_node_id': -1,
-                # Indicate we split, assume at most one split.
+                # Indicate we split, assume at most one split. Assume split always triggers a relation extend!
                 'ModifyTableIndexInsert_num_splits': int(split),
-                # But we don't need to extend.
-                # Heuristic go brrrr....
-                'ModifyTableIndexInsert_num_extends': 0,
+                'ModifyTableIndexInsert_num_extends': int(split),
             })
         return addt_ous
 
@@ -482,6 +482,7 @@ def generate_query_ous(conn, scratch, window_stats, idxoid_table_map, tableoid_m
                     ou["query_order"] = tup.query_order
                     # FIXME(INTERVAL): what interval is this data executing in??
                     ou["unix_timestamp"] = float(0)
+                    ou["PLOT_TS"] = tup.statement_timestamp
                     accumulate_ou(ou)
                 pbar.update(1)
         pbar.close()
@@ -494,7 +495,7 @@ def generate_query_ous(conn, scratch, window_stats, idxoid_table_map, tableoid_m
     open(tmp_data_dir / "done", "w").close()
 
 
-def slice_windows(conn, input_dir, slice_window, TABLES, table_attr_map, table_keyspace_map, scratch, workload_models):
+def slice_windows(conn, input_dir, slice_window, TABLES, ff_tbl_change_map, pg_class, table_attr_map, table_keyspace_map, scratch, workload_model):
     # Load the initial data map.  data_map = {}
     data_map = {}
     for tbl in TABLES:
@@ -510,18 +511,17 @@ def slice_windows(conn, input_dir, slice_window, TABLES, table_attr_map, table_k
     table_state = {}
     for tbl in TABLES:
         result = [r for r in conn.execute(f"SELECT * FROM pgstattuple_approx('{tbl}')", prepare=False)][0]
-        # FIXME(FF): this FF is embedded.
         table_state[tbl] = {
                 "table_len": result[0],
                 "approx_free_percent": result[9],
                 "dead_tuple_percent": result[7],
                 "approx_tuple_count": result[2],
                 "tuple_len_avg": result[3] / result[2],
-                "ff": 10
+                "ff": pg_class[tbl]["fillfactor"] * 100.0,
             }
 
     # Mutate the table state based on the queries.
-    def mutate_table_state(table_state, queries, extend_percent, hot_percent):
+    def mutate_table_state(tbl, table_state, queries, extend_percent, hot_percent):
         if queries.shape[0] == 0:
             return table_state
 
@@ -543,14 +543,15 @@ def slice_windows(conn, input_dir, slice_window, TABLES, table_attr_map, table_k
         table_state["dead_tuple_percent"] = new_dead_tuples / new_table_len
         # Approximate free is take the number of "available" and divide it by "# alive and # dead".
         table_state["approx_free_percent"] = max(0.0, 1 - (new_table_len / table_state["tuple_len_avg"]) / (new_tuple_count + new_dead_tuples))
-        # FIXME(TUPLEN): Should we update the tuple length average? Assume it doesn't change, I guess. OR we'd have to estiamte it. uh-oh.
+        # FIXME(TUPLEN): Should we update the tuple length average? Assume it doesn't change, I guess. OR we'd have to estimate it. uh-oh.
 
-        # FIXME(FF): we need to mutate the fill factor at some point!! Hack it by embedding a timestamp??
-        if np.sum(queries.statement_timestamp >= 713539480121667) > 0:
-            table_state["ff"] = 100
-        elif np.sum(queries.statement_timestamp >= 713535874829312) > 0:
-            table_state["ff"] = 50
-
+        if tbl in ff_tbl_change_map:
+            # Mutate the fill factor based on when we know the ALTER TABLE was executed.
+            slots = ff_tbl_change_map[tbl]
+            for (ts, ff) in slots:
+                if np.sum(queries.statement_timestamp >= ts) > 0:
+                    table_state["ff"] = ff
+                    break
         return table_state
 
     chunks = scratch / "chunks"
@@ -574,8 +575,6 @@ def slice_windows(conn, input_dir, slice_window, TABLES, table_attr_map, table_k
                 if tbl in table_keyspace_map and tbl in table_keyspace_map[tbl]:
                     keyspace = table_keyspace_map[tbl][tbl]
 
-                workload_model = workload_models[str(table_state[tbl]["ff"])]
-
                 data = data_map[group[0]].copy() if group[0] in data_map else None
                 inputs = WorkloadModel.featurize(group[1], data, table_state[tbl], keyspace, train=False)
                 inputs = workload_model.prepare_inputs(pd.DataFrame([inputs]), train=False)
@@ -590,7 +589,7 @@ def slice_windows(conn, input_dir, slice_window, TABLES, table_attr_map, table_k
                 }
 
                 # Mutate the table state accordingly.
-                table_state[tbl] = mutate_table_state(table_state[tbl], chunk[(chunk.OP != "SELECT") & (chunk.modify_target == tbl)], extend_percent, hot_percent)
+                table_state[tbl] = mutate_table_state(tbl, table_state[tbl], chunk[(chunk.OP != "SELECT") & (chunk.modify_target == tbl)], extend_percent, hot_percent)
             window_stats.append(chunk_window_stats)
 
             # Update the data map based on the modify target of the actual queries.
@@ -626,18 +625,8 @@ def main(benchmark, psycopg2_conn, session_sql, dir_models, dir_workload_model, 
 
     # Load the models
     base_models = load_models(dir_models)
-
-    # FIXME(HACK): Loading all the fillfactor models independently.
-    workload_models = {}
-    ff10 = WorkloadModel()
-    ff10.load(f"{dir_workload_model}/ff10_sep_epochs10000")
-    ff50 = WorkloadModel()
-    ff50.load(f"{dir_workload_model}/ff50_sep_epochs10000")
-    ff100 = WorkloadModel()
-    ff100.load(f"{dir_workload_model}/ff100_sep_epochs10000")
-    workload_models["10"] = ff10
-    workload_models["50"] = ff50
-    workload_models["100"] = ff100
+    workload_model = WorkloadModel()
+    workload_model.load(dir_workload_model)
 
     # Scratch space is used to try and reduce debugging overhead.
     scratch = dir_scratch / "eval_query_workload_scratch"
@@ -671,7 +660,23 @@ def main(benchmark, psycopg2_conn, session_sql, dir_models, dir_workload_model, 
         for tup in result:
             idxoid_table_map[tup[0]] = tup[1]
 
-        window_stats = slice_windows(conn, dir_data, slice_window, TABLES, table_attr_map, table_keyspace_map, scratch, workload_models)
+        ddl = pd.read_csv(f"{dir_data}/pg_qss_ddl.csv")
+        ddl = ddl[ddl.command == "AlterTableOptions"]
+        ff_tbl_change_map = {t: [] for t in TABLES}
+        for tbl in TABLES:
+            query_str = ddl["query"].str
+            slots = query_str.contains(tbl) & query_str.contains("fillfactor")
+            tbl_changes = ddl[slots]
+            for q in tbl_changes.itertuples():
+                root = pglast.Node(pglast.parse_sql(q.query))
+                for node in root.traverse():
+                    if isinstance(node, pglast.node.Node):
+                        if isinstance(node.ast_node, pglast.ast.DefElem):
+                            if node.ast_node.defname == "fillfactor":
+                                ff = node.ast_node.arg.val
+                                ff_tbl_change_map[tbl].append((q.statement_timestamp, ff))
+
+        window_stats = slice_windows(conn, dir_data, slice_window, TABLES, ff_tbl_change_map, metadata["pg_class"], table_attr_map, table_keyspace_map, scratch, workload_model)
         generate_query_ous(conn, scratch, window_stats, idxoid_table_map, metadata["pg_class_lookup"], metadata)
         augment_ous(scratch / "ous", [metadata], conn)
 
@@ -690,6 +695,8 @@ def main(benchmark, psycopg2_conn, session_sql, dir_models, dir_workload_model, 
         base_output = dir_evals_output / f"eval_{eval_timestamp}"
         base_output.mkdir(parents=True, exist_ok=True)
         evaluate_query_plans(eval_batch_size, base_models, scratch / "ous", df, base_output)
+        with open(f"{base_output}/ddl_changes.pickle", "wb") as f:
+            pickle.dump(ff_tbl_change_map, f)
 
 
 class EvalQueryWorkloadCLI(cli.Application):

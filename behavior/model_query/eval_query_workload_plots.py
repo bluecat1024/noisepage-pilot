@@ -159,6 +159,39 @@ def generate_predicted_query_error_modify(query_stream, dir_output):
     txtout.close()
 
 
+def generate_plots(query_stream, dir_output):
+    with open(dir_output / "summary.txt", "w") as f:
+        f.write(f"Total Elapsed Us: {query_stream.elapsed_us.sum()}\n")
+        f.write(f"Total Predicted Elapsed Us: {query_stream.pred_elapsed_us.sum()}\n")
+
+        def summary(df, prefix):
+            f.write(f"Average Absolute Error ({prefix}): {(df.abs_diff.sum() / df.shape[0])}\n")
+
+            box = [1, 5, 10, 100]
+            for bound in box:
+                f.write(f"% within absolute error {bound} ({prefix}): {(len(df[df.abs_diff < bound]) / df.shape[0])}\n")
+            f.write(f"% exceed absolute error {box[-1]} ({prefix}): {(len(df[df.abs_diff >= box[-1]]) / df.shape[0])}\n")
+
+            for bound in box:
+                f.write(f"% underpredict error {bound} ({prefix}): {(len(df[(df.predicted_minus_elapsed < 0) & (df.abs_diff < bound)]) / df.shape[0])}\n")
+            f.write(f"% exceed underpredict error {box[-1]} ({prefix}): {(len(df[(df.predicted_minus_elapsed < 0) & (df.abs_diff >= box[-1])]) / df.shape[0])}\n")
+
+        select = query_stream[query_stream.OP == "SELECT"]
+        modify = query_stream[query_stream.OP != "SELECT"]
+        summary(query_stream, "All Queries")
+        f.write("\n")
+
+        summary(select, "SELECT")
+        f.write("\n")
+
+        summary(modify, "MODIFY")
+
+    generate_holistic(query_stream, dir_output)
+    generate_per_query_plots(query_stream, dir_output)
+    generate_predicted_query_error(query_stream, dir_output, 0, None)
+    generate_predicted_query_error_modify(query_stream, dir_output)
+
+
 def main(dir_input):
     inputs = dir_input.rglob("query_results.feather")
     for input_result in inputs:
@@ -171,36 +204,29 @@ def main(dir_input):
         query_stream["abs_diff"] = query_stream.predicted_minus_elapsed.apply(lambda c: abs(c))
         query_stream["cnt"] = 1
 
-        with open(dir_output / "summary.txt", "w") as f:
-            f.write(f"Total Elapsed Us: {query_stream.elapsed_us.sum()}\n")
-            f.write(f"Total Predicted Elapsed Us: {query_stream.pred_elapsed_us.sum()}\n")
+        consider_streams = [("original", query_stream),]
+        if Path(input_result.parent / "ddl_changes.pickle").exists():
+            with open(f"{input_result.parent}/ddl_changes.pickle", "rb") as f:
+                ff_tbl_change_map = pickle.load(f)
 
-            def summary(df, prefix):
-                f.write(f"Average Absolute Error ({prefix}): {(df.abs_diff.sum() / df.shape[0])}\n")
+            if len(ff_tbl_change_map) > 0:
+                # We just use an arbitrary table's timestamps to segment.
+                # The reason we do this: no queries run during a period of DDL changes.
+                slots = ff_tbl_change_map[list(ff_tbl_change_map.keys())[0]]
+                for i, (ts, _) in enumerate(slots):
+                    consider_streams.append((f"{i}", query_stream[query_stream.PLOT_TS < ts]))
+                    query_stream = query_stream[query_stream.PLOT_TS >= ts]
 
-                box = [1, 5, 10, 100]
-                for bound in box:
-                    f.write(f"% within absolute error {bound} ({prefix}): {(len(df[df.abs_diff < bound]) / df.shape[0])}\n")
-                f.write(f"% exceed absolute error {box[-1]} ({prefix}): {(len(df[df.abs_diff >= box[-1]]) / df.shape[0])}\n")
+                if query_stream.shape[0] > 0:
+                    consider_streams.append((f"{len(slots)}", query_stream))
 
-                for bound in box:
-                    f.write(f"% underpredict error {bound} ({prefix}): {(len(df[(df.predicted_minus_elapsed < 0) & (df.abs_diff < bound)]) / df.shape[0])}\n")
-                f.write(f"% exceed underpredict error {box[-1]} ({prefix}): {(len(df[(df.predicted_minus_elapsed < 0) & (df.abs_diff >= box[-1])]) / df.shape[0])}\n")
-
-            select = query_stream[query_stream.OP == "SELECT"]
-            modify = query_stream[query_stream.OP != "SELECT"]
-            summary(query_stream, "All Queries")
-            f.write("\n")
-
-            summary(select, "SELECT")
-            f.write("\n")
-
-            summary(modify, "MODIFY")
-
-        generate_holistic(query_stream, dir_output)
-        generate_per_query_plots(query_stream, dir_output)
-        generate_predicted_query_error(query_stream, dir_output, 0, None)
-        generate_predicted_query_error_modify(query_stream, dir_output)
+        for (flag, query_stream) in consider_streams:
+            if flag == "original":
+                generate_plots(query_stream, dir_output)
+            else:
+                sub_output = dir_output / f"{flag}"
+                sub_output.mkdir(parents=True, exist_ok=True)
+                generate_plots(query_stream, sub_output)
 
 
 class EvalQueryWorkloadPlotsCLI(cli.Application):
