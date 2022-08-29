@@ -13,6 +13,7 @@ from enum import Enum, auto, unique
 import pandas as pd
 import numpy as np
 from behavior import OperatingUnit
+import pglast
 
 
 BLOCKSZ = 8192
@@ -450,13 +451,20 @@ def _compute_derived_ous(conn, ou, template_ous, metadata, predictive):
     return add_ous
 
 
-def generate_query_ous(window_queries, window_metadata, conn, tmp_data_dir, predictive):
+def generate_query_ous(window_queries, window_metadata, ff_tbl_change_map, conn, tmp_data_dir, predictive):
     global QUERY_CACHE
 
     # Accumulator for all the OU features.
     ou_features = {ou.name: [] for ou in OperatingUnit}
     output_counter = 0
     num_added = 0
+
+    if len(ff_tbl_change_map) > 0:
+        # We just use an arbitrary table's timestamps to segment.
+        # The reason we do this: no queries run during a period of DDL changes.
+        ff_changes = ff_tbl_change_map[list(ff_tbl_change_map.keys())[0]]
+    else:
+        ff_changes = []
 
     def accumulate_ou(ou):
         nonlocal num_added
@@ -486,6 +494,15 @@ def generate_query_ous(window_queries, window_metadata, conn, tmp_data_dir, pred
         _implant_stats(conn, metadata['pg_class'])
 
         for query in tqdm(queries.itertuples(), total=queries.shape[0]):
+            if len(ff_changes) > 0:
+                # Change the fillfactor of all metadata tables. This is fine since
+                # we process in increasing order and also because we assume we change
+                # all tables simultaneously.
+                for i, (ts, ff) in enumerate(ff_changes):
+                    if query.statement_timestamp >= ts:
+                        for md in metadata["pg_class"]:
+                            metadata["pg_class"][md]["fillfactor"] = int(ff)
+
             # Yoink all the OUs for a given query plan.
             plan_ous = []
             ous = _evaluate_query_for_plan(conn, query.query_text)

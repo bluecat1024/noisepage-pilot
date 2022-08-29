@@ -3,6 +3,7 @@ from __future__ import annotations
 import itertools
 import logging
 import os
+import gc
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -30,7 +31,7 @@ IGNORE_COLS = [
 ]
 
 
-def load_data(train_files):
+def load_data(train_files, ou):
     """Load the training data.
 
     Parameters
@@ -53,22 +54,17 @@ def load_data(train_files):
     # a few operating units.
     result_paths = [fp for fp in train_files if os.stat(fp).st_size > 0]
     ou_name_to_df: dict[str, DataFrame] = {}
-    for ou in OperatingUnit:
-        ou_name = ou.name
-        ou_results = [fp for fp in result_paths if fp.name.startswith(ou_name)]
-        if len(ou_results) > 0:
-            logger.debug("Found %s run(s) for %s", len(ou_results), ou_name)
-            def invoke(path):
-                # We are loading data for training purposes.
-                return load_input_data(logger, path, {}, True)
 
-            ou_name_to_df[ou_name] = pd.concat(map(invoke, ou_results))
+    ou_results = [fp for fp in result_paths if fp.name.startswith(ou.name)]
+    if len(ou_results) > 0:
+        logger.debug("Found %s run(s) for %s", len(ou_results), ou.name)
+        def invoke(path):
+            # We are loading data for training purposes.
+            return load_input_data(logger, path, {}, True)
 
-    # We should always have data for at least one operating unit.
-    if len(ou_name_to_df) == 0:
-        raise Exception(f"No data found in data_dirs: {data_dirs}")
+        return pd.concat(map(invoke, ou_results))
 
-    return ou_name_to_df
+    return None
 
 
 def main(
@@ -103,13 +99,17 @@ def main(
     assert len(train_files) > 0, "No matching data files for training could be found."
 
     # Load the data and name the model.
-    train_ou_to_df = load_data(train_files)
     output_dir = dir_output / f"{config_file.stem}_{training_timestamp}"
     output_dir.mkdir(parents=True, exist_ok=True)
     with (output_dir / "source.txt").open("w+") as f:
         f.write(f"Train: {train_files}\n")
 
-    for ou_name, df_train in train_ou_to_df.items():
+    for ou in OperatingUnit:
+        ou_name = ou.name
+        df_train = load_data(train_files, ou)
+        if df_train is None:
+            continue
+
         logger.info("Begin Training OU: %s", ou_name)
         logger.info("Deriving input features for OU: %s", ou_name)
         targets = [Targets.ELAPSED_US.value]
@@ -131,6 +131,8 @@ def main(
         # Partition the features and targets.
         x_train = featurize.extract_input_features(df_train, features)
         y_train = df_train[targets].values
+        del df_train
+        gc.collect()
 
         # Check if no valid training data was found (for the current operating unit).
         if x_train.shape[1] == 0 or y_train.shape[1] == 0:
@@ -160,7 +162,9 @@ def main(
 
             ou_model.train(x_train, y_train)
             ou_model.save(output)
-            evaluate_ou_model(ou_model, output, "train", eval_file=None, eval_df=df_train)
+            del ou_model
+
+        gc.collect()
 
 
 class TrainCLI(cli.Application):

@@ -95,8 +95,8 @@ def merge_index_metadata(data, metadata, column, time_pg_stats):
 
 
 class StateMergeCLI(cli.Application):
-    dir_datagen_diff = cli.SwitchAttr(
-        "--dir-datagen-diff",
+    dir_datagen_merge = cli.SwitchAttr(
+        "--dir-datagen-merge",
         Path,
         mandatory=True,
         help="Directory containing data that needs to be merged with snapshots.",
@@ -106,6 +106,9 @@ class StateMergeCLI(cli.Application):
         Path,
         mandatory=True,
         help="Directory to output updated CSV files to.",
+    )
+    glob_pattern = cli.SwitchAttr(
+        "--glob-pattern", mandatory=False, help="Glob pattern to use for selecting valid experiments."
     )
 
 
@@ -144,10 +147,11 @@ class StateMergeCLI(cli.Application):
         pd.set_option('display.float_format', lambda x: '%.3f' % x)
 
         # Look through all the experiments.
-        experiments = sorted(path.name for path in self.dir_datagen_diff.glob("*"))
+        pattern = "*" if self.glob_pattern is None else self.glob_pattern
+        experiments = sorted(path.name for path in self.dir_datagen_merge.glob(pattern))
         for experiment in experiments:
             # Look through all benchmarks within the experiment.
-            experiment_root = self.dir_datagen_diff / experiment
+            experiment_root = self.dir_datagen_merge / experiment
             bench_names = sorted([d.name for d in experiment_root.iterdir() if d.is_dir()])
             for bench_name in bench_names:
                 benchmark_path = f"{experiment_root}/{bench_name}/"

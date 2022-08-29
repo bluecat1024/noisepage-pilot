@@ -242,8 +242,11 @@ def task_behavior_perform_plan_state_merge():
     """
     Behavior modeling: perform merging of raw data with snapshots.
     """
-    def merge_action():
-        args = f"--dir-datagen-diff {ARTIFACT_DATA_DIFF} " f"--dir-output {ARTIFACT_DATA_MERGE}"
+    def merge_action(glob_pattern):
+        args = f"--dir-datagen-merge {ARTIFACT_DATA_DIFF} " f"--dir-output {ARTIFACT_DATA_MERGE}"
+        if glob_pattern is not None:
+            args = args + f" --glob-pattern '{glob_pattern}'"
+
         return f"python3 -m behavior state_merge {args}"
 
     return {
@@ -259,6 +262,14 @@ def task_behavior_perform_plan_state_merge():
         ],
         "uptodate": [False],
         "verbosity": VERBOSITY_DEFAULT,
+        "params": [
+            {
+                "name": "glob_pattern",
+                "long": "glob_pattern",
+                "help": "Glob pattern for selecting which experiments to perform merging.",
+                "default": None,
+            },
+        ],
     }
 
 
@@ -382,18 +393,20 @@ def task_behavior_eval_query():
     """
     Behavior modeling: perform query-level model analysis.
     """
-    def eval_cmd(session_sql, eval_raw_data, base_models, psycopg2_conn, num_iterations, predictive):
+    def eval_cmd(benchmark, session_sql, eval_raw_data, base_models, psycopg2_conn, num_iterations, predictive):
         if base_models is None:
             # Find the latest experiment by last modified timestamp.
             experiment_list = sorted((exp_path for exp_path in ARTIFACT_MODELS.glob("*")), key=os.path.getmtime)
             assert len(experiment_list) > 0, "No experiments found."
             base_models = experiment_list[-1] / "gbm_l2"
 
+        assert benchmark in BENCHDB_TO_TABLES, "Unknwon benchmark specified."
         assert eval_raw_data is not None, "No path to experiment data specified."
         assert os.path.isdir(base_models), f"Specified path {base_models} is not a valid directory."
         assert psycopg2_conn is not None, "No Psycopg2 connection string is specified."
 
         eval_args = (
+            f"--benchmark {benchmark} "
             f"--dir-data {eval_raw_data} "
             f"--dir-base-models {base_models} "
             f"--dir-evals-output {ARTIFACT_EVALS_QUERY} "
@@ -413,6 +426,12 @@ def task_behavior_eval_query():
         "verbosity": VERBOSITY_DEFAULT,
         "uptodate": [False],
         "params": [
+            {
+                "name": "benchmark",
+                "long": "benchmark",
+                "help": "Benchmark that is being evaluated.",
+                "default": None,
+            },
             {
                 "name": "session_sql",
                 "long": "session_sql",

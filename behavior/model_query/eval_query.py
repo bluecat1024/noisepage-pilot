@@ -1,5 +1,6 @@
 import logging
 import glob
+import pglast
 import shutil
 import gc
 import re
@@ -208,7 +209,7 @@ def _slice_queries(query_stream, conn, scratch_it, iteration_count):
     return sliced_query_stream, sliced_metadata
 
 
-def main(num_iterations, psycopg2_conn, session_sql, dir_models, dir_data, dir_evals_output, dir_scratch, predictive):
+def main(benchmark, num_iterations, psycopg2_conn, session_sql, dir_models, dir_data, dir_evals_output, dir_scratch, predictive):
     logger.info("Executing in predictive mode: %s", predictive)
     if not predictive:
         # Only run for 1 iteration if not in predictive mode.
@@ -233,6 +234,9 @@ def main(num_iterations, psycopg2_conn, session_sql, dir_models, dir_data, dir_e
                     conn.execute(line)
 
         while iteration_count < num_iterations:
+            target_output = base_output / f"preds_{iteration_count}"
+            target_output.mkdir(parents=True, exist_ok=True)
+
             scratch_it = scratch / f"{iteration_count}"
             scratch_it.mkdir(parents=True, exist_ok=True)
             if (scratch_it / "final_query.feather").exists():
@@ -256,7 +260,27 @@ def main(num_iterations, psycopg2_conn, session_sql, dir_models, dir_data, dir_e
 
             logger.info("[%s, %s]: Generate query operating units", iteration_count, datetime.now())
             if not (scratch_it / "generate_query_ous").exists():
-                generate_query_ous(sliced_query_stream, sliced_metadata, conn, scratch_it, predictive)
+                # Load the relevant fill factor changes from pg_qss_ddl.
+                ddl = pd.read_csv(dir_data / "pg_qss_ddl.csv")
+                ddl = ddl[ddl.command == "AlterTableOptions"]
+                ff_tbl_change_map = {t: [] for t in TABLES}
+                for tbl in BENCHDB_TO_TABLES[benchmark]:
+                    query_str = ddl["query"].str
+                    slots = query_str.contains(tbl) & query_str.contains("fillfactor")
+                    tbl_changes = ddl[slots]
+                    for q in tbl_changes.itertuples():
+                        root = pglast.Node(pglast.parse_sql(q.query))
+                        for node in root.traverse():
+                            if isinstance(node, pglast.node.Node):
+                                if isinstance(node.ast_node, pglast.ast.DefElem):
+                                    if node.ast_node.defname == "fillfactor":
+                                        ff = node.ast_node.arg.val
+                                        ff_tbl_change_map[tbl].append((q.statement_timestamp, ff))
+
+                with open(f"{target_output}/ddl_changes.pickle", "wb") as f:
+                    pickle.dump(ff_tbl_change_map, f)
+
+                generate_query_ous(sliced_query_stream, sliced_metadata, ff_tbl_change_map, conn, scratch_it, predictive)
             gc.collect()
 
             logger.info("[%s, %s]: Augmenting query operating units", iteration_count, datetime.now())
@@ -266,9 +290,6 @@ def main(num_iterations, psycopg2_conn, session_sql, dir_models, dir_data, dir_e
             # No longer need sliced_metadata after this point.
             del sliced_metadata
             gc.collect()
-
-            target_output = base_output / f"preds_{iteration_count}"
-            target_output.mkdir(parents=True, exist_ok=True)
 
             # Evaluate query plans and relase resources.
             logger.info("[%s, %s]: Evaluating query plans", iteration_count, datetime.now())
@@ -287,6 +308,12 @@ def main(num_iterations, psycopg2_conn, session_sql, dir_models, dir_data, dir_e
 
 
 class EvalQueryCLI(cli.Application):
+    benchmark = cli.SwitchAttr(
+        "--benchmark",
+        str,
+        mandatory=True,
+        help="Benchmark that is being evaluated.",
+    )
     session_sql = cli.SwitchAttr(
         "--session-sql",
         Path,
@@ -336,7 +363,8 @@ class EvalQueryCLI(cli.Application):
     )
 
     def main(self):
-        main(self.num_iterations,
+        main(self.benchmark,
+             self.num_iterations,
              self.psycopg2_conn,
              self.session_sql,
              self.dir_models,

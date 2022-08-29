@@ -84,5 +84,5 @@ def prepare_inference_query_stream(dir_data):
     # We don't actually want the statement_timestamp since that is "real" time but we do want the queries
     # in the correct execution order.
     query_stats["order"] = np.arange(len(query_stats))
-    query_stats.reset_index(drop=True, inplace=True)
+    query_stats.reset_index(drop=False, inplace=True)
     return query_stats

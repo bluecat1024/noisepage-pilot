@@ -211,6 +211,7 @@ def task_noisepage_qss_install():
     sql_list2 = [
         "DROP TABLE IF EXISTS pg_catalog.pg_qss_plans",
         "DROP TABLE IF EXISTS pg_catalog.pg_qss_stats",
+        "DROP TABLE IF EXISTS pg_catalog.pg_qss_ddl",
         """CREATE UNLOGGED TABLE pg_catalog.pg_qss_plans(
             query_id bigint,
             generation integer,
@@ -241,6 +242,13 @@ def task_noisepage_qss_install():
             payload bigint,
             txn bigint,
             comment text
+            )
+            WITH (autovacuum_enabled = OFF)""",
+        """CREATE UNLOGGED TABLE pg_catalog.pg_qss_ddl(
+	    db_id integer,
+	    statement_timestamp bigint,
+            query text,
+            command text
             )
             WITH (autovacuum_enabled = OFF)""",
         "ALTER SYSTEM SET shared_preload_libraries='qss','pgstattuple'",

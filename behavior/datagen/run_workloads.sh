@@ -282,9 +282,11 @@ for workload in "${workload_directory}"/*; do
             then
                 plans_file="${benchmark_output}/pg_qss_plans.csv"
                 stats_file="${benchmark_output}/pg_qss_stats.csv"
+                ddl_file="${benchmark_output}/pg_qss_ddl.csv"
                 ${psql} --dbname=benchbase --csv --command="SELECT * FROM pg_catalog.pg_qss_plans;" > "${plans_file}"
-                # Hopefully this does not blow up.
-                ${psql} --dbname=benchbase --csv --command="SELECT * FROM pg_catalog.pg_qss_stats ORDER BY statement_timestamp;" > "${stats_file}"
+                ${psql} --dbname=benchbase --csv --command="SELECT * FROM pg_catalog.pg_qss_ddl;" > "${ddl_file}"
+                ${psql} --dbname=benchbase --csv --variable="FETCH_COUNT=131072" --command="SELECT * FROM pg_catalog.pg_qss_stats;" > /tmp/pg_qss_stats.csv
+                sort -t, -n -k4,4 -k5,5 /tmp/pg_qss_stats.csv -o "${stats_file}"
             fi
 
             if [ ! -z "$post_execute" ];
