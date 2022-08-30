@@ -28,3 +28,7 @@ __pycache__/
 dist/
 *.egg-info/
 *.egg
+
+*.so
+run.sh
+config/behavior/skynet.yaml

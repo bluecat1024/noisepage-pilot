@@ -1,16 +1,99 @@
 # DataGeneratorCLI configuration.
 datagen:
-  pg_prewarm: True
-  pg_analyze: True
-  benchmarks: [tpcc]        # Benchmarks include: [auctionmark, epinions, seats, sibench, smallbank, tatp, tpcc, tpch, twitter, voter, wikipedia, ycsb]
   log_level: DEBUG
-  param_sweep:
-    scalefactor: [1]
-    terminals: [1]
-    works.work.rate: [10000]
-    works.work.time: [60]
-  knob_sweep_enabled: True
-  knob_change_warmup: 5
-  knob_sweep:
-    work_mem: [1024, 2048, 4096, 8192, 16384]
-    hash_mem_multiplier: [0.25, 0.5, 1.0, 2.0, 4.0]
+
+  # Describes a default workload execution configuration
+  default_config:
+    # Experiment Global Options
+    output_name: null
+
+    # Benchmarks include: [auctionmark, epinions, seats, sibench, smallbank, tatp, tpcc, tpch, twitter, voter, wikipedia, ycsb]
+    # This is the benchmark that should be executed.
+    benchmark: tpcc
+    # scale factor at which to load the database and execute it at.
+    scalefactor: 1
+    # Path to a saved database that should be restored with pg_restore. If this is specified, then the
+    # benchbase data loader will not run.
+    restore_db_path: null
+    # Path to a file of SQL that should be executed after benchbase create.
+    post_create_sql: null
+    # Whether subsequent runs should honor pg_prewarm/pg_analyze/configuration swap.
+    continuous: false
+    # Whether pg_prewarm should be executed before each run. Disabled if continuous=True.
+    pg_prewarm: True
+    # Whether analyze should be executed before each run. Disabled if continuous=True.
+    pg_analyze: True
+    # Whether to dump the database.
+    dump_db: False
+    # Location to dump the database to if we're dumping the database.
+    dump_db_path: null
+    # Whether to enable the userspace collector.
+    enable_collector: True
+    # Whether to snapshot the data at the start right after LOAD.
+    snapshot_data: False
+    # Default options that will (default) apply to all runs. Can be overriden.
+    default_options:
+      - qss_capture_enabled = ON
+      - qss_capture_nested = ON
+      - qss_capture_exec_stats = ON
+      - qss_output_noisepage = ON
+      - qss_capture_abort = ON
+
+    runs:
+      # Options that describe each run. These arrays must have the same length.
+      - terminals: 1
+        works.work.rate: unlimited
+        works.work.time: 60
+        post_execute_sql: null
+        # Specifying this requires continuous = False since that requires restarting the database.
+        # If continuous = True, these options for subsequent runs are not honored.
+        options: null
+        isolation: TRANSACTION_REPEATABLE_READ
+
+  configs:
+    # Describes a specific configuration. Inherits from default.
+    - output_name: tpcc_sf0.01
+      scalefactor: 0.01
+      runs:
+        - terminals: 1
+          works.work.rate: unlimited
+          works.work.time: 60
+          isolation: TRANSACTION_REPEATABLE_READ
+    #- output_name: tpcc_sf0.01
+    #  restore_db_path: /tmp/dump.dir
+    #  scalefactor: 0.01
+    #  continuous: true
+    #  runs:
+    #    - terminals: 1
+    #      works.work.rate: unlimited
+    #      works.work.time: 10
+    #      isolation: TRANSACTION_REPEATABLE_READ
+    #      post_execute_sql: "/tmp/fillfactor.sql"
+    #      options:
+    #        - enable_seqscan = off
+    #    - terminals: 1
+    #      works.work.rate: unlimited
+    #      works.work.time: 30
+    #      isolation: TRANSACTION_REPEATABLE_READ
+    #      post_execute_sql: "/tmp/fillfactor.sql"
+    #      options:
+    #        - enable_bitmapscan = off
+
+    #- output_name: tpcc_sf0.01
+    #  restore_db_path: /tmp/dump.dir
+    #  scalefactor: 0.01
+    #  runs:
+    #    - terminals: 1
+    #      works.work.rate: unlimited
+    #      works.work.time: 30
+    #     isolation: TRANSACTION_REPEATABLE_READ
+
+    #- output_name: tpcc_sf0.01
+    #  dump_db: True
+    #  post_create_sql: "/tmp/fillfactor.sql"
+    #  scalefactor: 0.01
+    #  runs:
+    #    - terminals: 1
+    #      works.work.rate: unlimited
+    #     works.work.time: 30
+    #      isolation: TRANSACTION_REPEATABLE_READ

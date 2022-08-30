@@ -1,6 +1,6 @@
 # Modeling Configuration
 modeling:
-  methods: [lr, dt, rf, gbm]
+  methods: [rf, gbm_l2, mlp_2_128]
   normalize: True
   log_transform: False
   robust: False
@@ -8,34 +8,39 @@ modeling:
   random_state: 42
   log_level: INFO
 
+  # Featurize Configuration
+  featurize:
+    # Specifies the threshold for removing variables as highly correlated.  The default is 0.7 which
+    # means variables less than -0.7 and greater than 0.7 in pearson's correlation will be candidates
+    # for removal.
+    corr_limit: 0.70
+
+    # Taken from featurewiz parameter description for verbose:
+    #  0: Limited output. Great for running this silently and getting fast results.
+    #  1: More verbiage. Great for knowing how results were and making changes to flags in input.
+    #  2: SULOV charts and output. Great for finding out what happens under the hood for SULOV method.
+    verbose : 0
+
   # Model-specific Configuration
   # To learn more about the configuration parameters, 
   # visit the scikit-learn or LightGBM documentation.
   rf:
-    n_estimators: 25
+    n_estimators: 50
     max_depth: 31
     criterion: "squared_error" # or "absolute_error"
   gbm:
+    # naming convention gbm_[loss] or gbm_[loss]_[alpha]
     n_estimators: 100
     max_depth: 31
     num_leaves: 1000
     min_child_samples: 5
-    objective: "mape"
   mlp:
-    hidden_layer_sizes: [25, 25]
+    # naming convention is mlp_[# layers]_[# neurons per layer]
     early_stopping: True
     max_iter: 1000000
-    alpha: 5
+    alpha: 0.0001
   elastic:
     alpha: 0.1
     l1_ratio: 0.5
-  mt_elastic:
-    l1_ratio: 0.5
-  dt:
-    max_depth: 5
   huber:
     max_iter: 50
-  lasso:
-    alpha: 1.0
-  mt_lasso:
-    alpha: 1.0

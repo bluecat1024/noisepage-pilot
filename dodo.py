@@ -11,6 +11,8 @@ from dodos.pilot import *
 from dodos.project1 import *
 from dodos.tscout import *
 from dodos.gcncollection import *
+from dodos.collector import *
+from dodos.workload_analysis import *
 
 DOIT_CONFIG = {
     'backend': "sqlite3"
