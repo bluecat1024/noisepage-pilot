@@ -262,6 +262,12 @@ for workload in "${workload_directory}"/*; do
                 fi
             fi
 
+            if [ ! -z "$taskset_postgres" ] && [ "$taskset_postgres" != 'None' ];
+            then
+                postmaster_pid=$(pidof postgres | xargs -n1 | sort | head -n1)
+                taskset -pc $taskset_postgres $postmaster_pid
+            fi
+
             if [ "$enable_collector" != 'False' ];
             then
                 # Initialize collector. We currently don't have a means by which to check whether
@@ -270,7 +276,7 @@ for workload in "${workload_directory}"/*; do
             fi
 
             # Execute the benchmark
-            doit benchbase_run --benchmark="${benchmark}" --config="${benchbase_config_path}" --args="--execute=true"
+            doit benchbase_run --benchmark="${benchmark}" --config="${benchbase_config_path}" --args="--execute=true" --taskset_benchbase="$taskset_benchbase"
 
             if [ "$enable_collector" != 'False' ];
             then

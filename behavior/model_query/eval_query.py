@@ -263,7 +263,7 @@ def main(benchmark, num_iterations, psycopg2_conn, session_sql, dir_models, dir_
                 # Load the relevant fill factor changes from pg_qss_ddl.
                 ddl = pd.read_csv(dir_data / "pg_qss_ddl.csv")
                 ddl = ddl[ddl.command == "AlterTableOptions"]
-                ff_tbl_change_map = {t: [] for t in TABLES}
+                ff_tbl_change_map = {t: [] for t in BENCHDB_TO_TABLES[benchmark]}
                 for tbl in BENCHDB_TO_TABLES[benchmark]:
                     query_str = ddl["query"].str
                     slots = query_str.contains(tbl) & query_str.contains("fillfactor")

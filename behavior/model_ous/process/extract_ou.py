@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import json
 import logging
 import os
@@ -69,6 +70,9 @@ def main(data_dir, experiment) -> None:
             ou = transform_ou_df(ou_group[0], ou_group[1])
             ou.reset_index(drop=True, inplace=True)
             ou.to_feather(output_file)
+        del ou_groups
+        del qss_stats
+        gc.collect()
 
 
 class ExtractOUCLI(cli.Application):
