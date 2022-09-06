@@ -54,24 +54,29 @@ def main(data_dir, experiment) -> None:
         pg_qss_stats = bench_root / "pg_qss_stats.csv"
         assert pg_qss_stats.exists()
 
+        ou_groups = {}
+
         # Load in the query state store execution counters.
-        qss_stats = pd.read_csv(pg_qss_stats)
-        qss_stats = qss_stats[(qss_stats.plan_node_id != -1) & (qss_stats.query_id != 0) & (qss_stats.statement_timestamp != 0)]
-        if qss_stats.shape[0] == 0:
-            logger.info("Skipping %s", bench_name)
-            continue
+        for chunk in pd.read_csv(pg_qss_stats, chunksize=8192 * 1000):
+            qss_stats = chunk
+            qss_stats = qss_stats[(qss_stats.plan_node_id != -1) & (qss_stats.query_id != 0) & (qss_stats.statement_timestamp != 0)]
+            if qss_stats.shape[0] == 0:
+                continue
+
+            for ou_group in qss_stats.groupby(["comment"]):
+                if not ou_group[0] in ou_groups:
+                    ou_groups[ou_group[0]] = []
+
+                ou_groups[ou_group[0]].append(ou_group[1])
 
         ous = bench_root / "ous"
         ous.mkdir(parents=True, exist_ok=True)
-
-        ou_groups = qss_stats.groupby(["comment"])
-        for ou_group in ou_groups:
+        for ou_group in ou_groups.items():
             output_file = ous / f"Exec{ou_group[0]}.feather"
-            ou = transform_ou_df(ou_group[0], ou_group[1])
+            ou = transform_ou_df(ou_group[0], pd.concat(ou_group[1], ignore_index=True))
             ou.reset_index(drop=True, inplace=True)
             ou.to_feather(output_file)
         del ou_groups
-        del qss_stats
         gc.collect()
 
 
