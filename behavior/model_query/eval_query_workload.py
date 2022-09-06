@@ -1,3 +1,4 @@
+import math
 import random
 import pglast
 from tqdm import tqdm
@@ -14,7 +15,7 @@ import json
 from datetime import datetime
 import numpy as np
 import itertools
-import pickle
+import functools
 import pandas as pd
 import matplotlib.pyplot as plt
 import pickle
@@ -22,12 +23,10 @@ from pathlib import Path
 from plumbum import cli
 
 from behavior import OperatingUnit, Targets, BENCHDB_TO_TABLES
+from behavior.datagen.pg_collector_utils import _parse_field, KNOBS
 from behavior.utils.evaluate_ou import evaluate_ou_model
 from behavior.utils.prepare_ou_data import purify_index_input_data
-from behavior.model_query.utils.postgres import prepare_augmentation_data, prepare_pg_inference_state
-from behavior.model_query.utils.prepare_data import prepare_inference_query_stream
-from behavior.model_query.utils.postgres_model_plan import generate_vacuum_partition, generate_query_ous, estimate_query_modifications
-from behavior.model_workload.utils import compute_frame
+from behavior.model_workload.utils import keyspace_metadata_read
 from behavior.utils.process_pg_state_csvs import (
     process_time_pg_stats,
     process_time_pg_attribute,
@@ -36,211 +35,129 @@ from behavior.utils.process_pg_state_csvs import (
     merge_modifytable_data,
     build_time_index_metadata
 )
-from behavior.model_workload.model import WorkloadModel
+from behavior.model_workload.model import WorkloadModel, MODEL_WORKLOAD_TARGETS, NORM_RELATIVE_OPS
+from behavior.model_workload.utils import compute_frames as compute_frames_change
 import torch
 
 logger = logging.getLogger(__name__)
 
+##################################################################################
+# Logic related to setting up the state.
+##################################################################################
 
-def augment_ous(scratch_it, sliced_metadata, conn):
-    if ((scratch_it / "augment_query_ous")).exists():
-        return
-
-    # Prepare all the augmented catalog data in timestamp order.
-    aug_dfs = prepare_augmentation_data(sliced_metadata, conn)
-    process_tables, process_idxs = process_time_pg_class(aug_dfs["pg_class"])
-    process_pg_index = process_time_pg_index(aug_dfs["pg_index"])
-    process_pg_attribute = process_time_pg_attribute(aug_dfs["pg_attribute"])
-    time_pg_index = build_time_index_metadata(process_pg_index, process_tables.copy(deep=True), process_idxs, process_pg_attribute)
-
-    time_pg_stats = process_time_pg_stats(aug_dfs["pg_stats"])
-    time_pg_stats.set_index(keys=["unix_timestamp"], drop=True, append=False, inplace=True)
-    time_pg_stats.sort_index(axis=0, inplace=True)
-
-    pg_settings = aug_dfs["pg_settings"]
-    pg_settings["unix_timestamp"] = pg_settings.unix_timestamp.astype(np.float64)
-    pg_settings.set_index(keys=["unix_timestamp"], drop=True, append=False, inplace=True)
-    pg_settings.sort_index(axis=0, inplace=True)
-
-    index_augment = [OperatingUnit.IndexScan, OperatingUnit.IndexOnlyScan, OperatingUnit.ModifyTableIndexInsert]
-    for augment in index_augment:
-        column = {
-            OperatingUnit.IndexOnlyScan: "IndexOnlyScan_indexid",
-            OperatingUnit.IndexScan: "IndexScan_indexid",
-            OperatingUnit.ModifyTableIndexInsert: "ModifyTableIndexInsert_indexid"
-        }[augment]
-
-        files = sorted(glob.glob(f"{scratch_it}/{augment.name}.feather.*"))
-        for target_file in files:
-            if target_file.startswith("AUG"):
-                continue
-
-            logger.info("[AUGMENT] Input %s", target_file)
-            data = pd.read_feather(target_file)
-            data.set_index(keys=["unix_timestamp"], drop=True, append=False, inplace=True)
-            data.sort_index(axis=0, inplace=True)
-
-            data = pd.merge_asof(data, pg_settings, left_index=True, right_index=True, allow_exact_matches=True)
-            data = pd.merge_asof(data, time_pg_index, left_index=True, right_index=True, left_by=[column], right_by=["indexrelid"], allow_exact_matches=True)
-            assert data.indexrelid.isna().sum() == 0
-
-            indkey_atts = [key for key in data.columns if "indkey_attname_" in key]
-            for idx, indkey_att in enumerate(indkey_atts):
-                left_by = ["table_relname", indkey_att]
-                right_by = ["tablename", "attname"]
-                data = pd.merge_asof(data, time_pg_stats, left_index=True, right_index=True, left_by=left_by, right_by=right_by, allow_exact_matches=True)
-
-                # Rename the key and drop the other useless columns.
-                data.drop(labels=["tablename", "attname"], axis=1, inplace=True)
-                remapper = {column:f"indkey_{column}_{idx}" for column in time_pg_stats.columns}
-                data.rename(columns=remapper, inplace=True)
-
-            data = purify_index_input_data(data)
-            data.reset_index(drop=True, inplace=True)
-            data.to_feather(scratch_it / f"AUG_{augment.name}.feather{Path(target_file).suffix}")
-
-    mt_augment = [OperatingUnit.ModifyTableInsert, OperatingUnit.ModifyTableUpdate]
-    process_tables.set_index(keys=["unix_timestamp"], drop=True, append=False, inplace=True)
-    process_tables.sort_index(axis=0, inplace=True)
-    for augment in mt_augment:
-        files = sorted(glob.glob(f"{scratch_it}/{augment.name}.feather.*"))
-        for target_file in files:
-            logger.info("[AUGMENT] Input %s", target_file)
-            data = pd.read_feather(target_file)
-            data = merge_modifytable_data(data=data, processed_time_tables=process_tables)
-            data.to_feather(scratch_it / f"AUG_{augment.name}.feather{Path(target_file).suffix}")
-
-    open(scratch_it / "augment_query_ous", "w").close()
+def compute_ff_changes(dir_data, tables):
+    ddl = pd.read_csv(f"{dir_data}/pg_qss_ddl.csv")
+    ddl = ddl[ddl.command == "AlterTableOptions"]
+    ff_tbl_change_map = {t: [] for t in tables}
+    for tbl in tables:
+        query_str = ddl["query"].str
+        slots = query_str.contains(tbl) & query_str.contains("fillfactor")
+        tbl_changes = ddl[slots]
+        for q in tbl_changes.itertuples():
+            root = pglast.Node(pglast.parse_sql(q.query))
+            for node in root.traverse():
+                if isinstance(node, pglast.node.Node):
+                    if isinstance(node.ast_node, pglast.ast.DefElem):
+                        if node.ast_node.defname == "fillfactor":
+                            ff = node.ast_node.arg.val
+                            ff_tbl_change_map[tbl].append((q.statement_timestamp, ff))
+    return ff_tbl_change_map
 
 
-def evaluate_query_plans(eval_batch_size, base_models, scratch_it, queries, output_path):
-    # Evaluate all the OUs.
-    for ou in OperatingUnit:
-        ou_type = ou.name
-        key_fn = lambda x: int(x.split(".")[-1])
-        files = sorted(glob.glob(f"{scratch_it}/AUG_{ou.name}.feather.*"), key=key_fn)
-        if len(files) == 0:
-            files = sorted(glob.glob(f"{scratch_it}/{ou.name}.feather.*"), key=key_fn)
-
-        if len(files) == 0:
-            # This case is no data for the OU.
-            continue
-
-        def logged_read_feather(target):
-            logger.info("[^]: [LOAD] Input %s", target)
-            return pd.read_feather(target)
-
-        (output_path / ou_type).mkdir(parents=True, exist_ok=True)
-        eval_slices = [files[x:x+eval_batch_size] for x in range(0, len(files), eval_batch_size)]
-        for i, eval_slice in enumerate(eval_slices):
-            df = pd.concat(map(logged_read_feather, eval_slice))
-            df.reset_index(drop=True, inplace=True)
-
-            if ou_type not in base_models:
-                # If we don't have the model for the particular OU, we just predict 0.
-                df["pred_elapsed_us"] = 0
-                # Set a bit in [error_missing_model]
-                df["error_missing_model"] = 1
-            else:
-                df = evaluate_ou_model(base_models[ou_type], None, None, eval_df=df, return_df=True, output=False)
-                df["error_missing_model"] = 0
-
-                if OperatingUnit[ou_type] == OperatingUnit.IndexOnlyScan or OperatingUnit[ou_type] == OperatingUnit.IndexScan:
-                    prefix = "IndexOnlyScan" if OperatingUnit[ou_type] == OperatingUnit.IndexOnlyScan else "IndexScan"
-                    df["pred_elapsed_us"] = df.pred_elapsed_us * df[f"{prefix}_num_outer_loops"]
-
-            df.to_feather(output_path / ou_type / f"{ou_type}_evals_{i}.feather")
-
-    # Massage the frames together from disk to combat OOM.
-    unified_df = None
-    glob_files = []
-    for ou in OperatingUnit:
-        ou_type = ou.name
-        glob_files.extend(glob.glob(f"{output_path}/{ou_type}/{ou_type}_*.feather"))
-
-    assert len(glob_files) > 0
-    key = lambda x: int(x.split(".feather")[0].split("_")[-1])
-    glob_files = sorted(glob_files, key=key)
-    for ou_file in glob_files:
-        logger.info("[^]: [MASSAGE] Input %s", ou_file)
-        keep_columns = ["query_id", "query_order", "PLOT_TS", "pred_elapsed_us", "error_missing_model"]
-        df = pd.read_feather(ou_file, columns=keep_columns)
-        if unified_df is None:
-            unified_df = df
-        else:
-            unified_df = pd.concat([unified_df, df], ignore_index=True).groupby(["query_id", "query_order", "PLOT_TS"]).sum()
-            unified_df.reset_index(drop=False, inplace=True)
-        gc.collect()
-
-    assert unified_df is not None
-    unified_df.sort_values(by=["query_order"], inplace=True, ignore_index=True)
-
-    unified_df.set_index(keys=["query_id", "query_order"], inplace=True)
-    assert unified_df.index.is_unique
-
-    queries.set_index(keys=["query_id", "query_order"], inplace=True)
-    queries = queries.join(unified_df, how="inner")
-    queries.reset_index(drop=False, inplace=True)
-    assert np.sum(queries.pred_elapsed_us.isna()) == 0
-    queries.to_feather(output_path / "query_results.feather")
+def compute_table_oids(conn):
+    result = conn.execute("SELECT relname, oid from pg_class")
+    return {r[1]: r[0] for r in result}
 
 
-class Loader():
-    def _load_next_chunk(self):
-        logger.info("Reading in input chunk: %s", self.files[0])
-        self.current_chunk = pd.read_feather(f"{self.files[0]}/chunk.feather")
-        self.current_augment_chunk = pd.read_feather(f"{self.files[0]}/chunk_augment.feather")
-        self.files = self.files[1:]
+def compute_index_table_map(conn):
+    result = conn.execute("""
+            SELECT indexrelid,
+                   t.relname
+              FROM pg_index,
+                   pg_class t
+             WHERE pg_index.indrelid = t.oid
+        """)
+    return {tup[0]: tup[1] for tup in result}
 
-        none_slice = self.current_augment_chunk[self.current_augment_chunk.target.isnull()]
-        for tbl in self.tables:
-            targets = none_slice.query_text.str.contains(tbl)
-            self.current_augment_chunk.loc[none_slice[targets].index, "target"] = tbl
-        self.current_augment_chunk.set_index(keys=["slot"], inplace=True)
 
-    def __init__(self, dir_data, slice_window, tables):
-        super(Loader, self).__init__()
-        key_fn = lambda x: int(x.split("_")[-1])
-        self.files = sorted(glob.glob(f"{dir_data}/snippets/chunk_*"), key=key_fn)
-        self.slice_window = slice_window
-        self.tables = tables
-        self._load_next_chunk()
+def compute_index_keyspace_map(conn):
+    # These ignore the primary key space which is the table keyspace.
+    result = conn.execute("""
+            SELECT indexrelid,
+                   t.relname
+              FROM pg_index,
+                   pg_class t,
+                   pg_namespace n
+             WHERE pg_index.indexrelid = t.oid
+               AND n.oid = t.relnamespace
+               AND n.nspname = 'public'
+        """)
+    indexes = {tup[0]: tup[1] for tup in result}
 
-    def _get_from_chunk(self, num):
-        logger.info("Reading from current chunk: %s", num)
-        assert num <= self.current_chunk.shape[0]
+    result = conn.execute("""
+            select
+                t.relname as table_name,
+                i.relname as index_name,
+                ix.indexrelid,
+                ix.indisprimary,
+                array_to_string(array_agg(a.attname), ',') as column_names
+            from
+                pg_class t,
+                pg_class i,
+                pg_index ix,
+                pg_attribute a
+            where
+                t.oid = ix.indrelid
+                and i.oid = ix.indexrelid
+                and a.attrelid = t.oid
+                and a.attnum = ANY(ix.indkey)
+                and t.relkind = 'r'
+            group by
+                t.relname,
+                i.relname,
+                ix.indexrelid,
+                ix.indisprimary
+            order by
+                t.relname,
+                i.relname;
+        """)
 
-        chunk = self.current_chunk.iloc[:num]
-        chunk.reset_index(drop=True, inplace=True)
-        self.current_chunk = self.current_chunk.iloc[num:]
+    res_indexes = {}
+    for r in result:
+        if r[2] in indexes:
+            res_indexes[r[2]] = (r[1], r[4].split(","))
+    return res_indexes
 
-        # Compute the augmented chunk.
-        jchunk = chunk.set_index(keys=["slot"], inplace=False)
-        jchunk.drop(columns=[c for c in self.current_augment_chunk], errors='ignore', inplace=True)
-        augment_chunk = jchunk.join(self.current_augment_chunk, how="inner")
-        augment_chunk.reset_index(drop=False, inplace=True)
-        return chunk, augment_chunk
 
-    def get_next_slice(self):
-        if self.current_chunk.shape[0] >= self.slice_window:
-            return self._get_from_chunk(self.slice_window)
+def compute_trigger_map(conn):
+    with conn.cursor(row_factory=dict_row) as cursor:
+        result = cursor.execute("""
+            SELECT t.oid as "pg_trigger_oid", t.tgfoid, c.contype, c.confrelid, c.confupdtype, c.confdeltype, c.conkey, c.confkey, c.conpfeqop
+            FROM pg_trigger t, pg_constraint c
+            JOIN pg_namespace n ON c.connamespace = n.oid and n.nspname = 'public'
+            WHERE t.tgconstraint = c.oid
+        """, prepare=False)
 
-        if self.current_chunk.shape[0] == 0:
-            chunk = None
-            augment_chunk = None
-        else:
-            chunk, augment_chunk = self._get_from_chunk(self.current_chunk.shape[0])
+        triggers = {x["pg_trigger_oid"]: x for x in result}
 
-        while (chunk is None or chunk.shape[0] < self.slice_window) and len(self.files) > 0:
-            # Load the next chunk.
-            self._load_next_chunk()
+        result = cursor.execute("""
+            SELECT * FROM pg_attribute
+            JOIN pg_class c ON pg_attribute.attrelid = c.oid
+            JOIN pg_namespace n ON c.relnamespace = n.oid and n.nspname = 'public'
+        """, prepare=False)
 
-            data_slice = min(self.slice_window - chunk.shape[0], self.current_chunk.shape[0])
-            next_chunk, next_augment_chunk = self._get_from_chunk(data_slice)
-            chunk = pd.concat([chunk, next_chunk], ignore_index=True)
-            augment_chunk = pd.concat([augment_chunk, next_augment_chunk], ignore_index=True)
+        atts = {(x["attrelid"], x["attnum"]): x for x in result}
+        atttbls = [x for (x, _) in atts.keys()]
 
-        return chunk, augment_chunk
+        for _, trigger in triggers.items():
+            attnames = []
+            if trigger["confrelid"] in atttbls:
+                for attnum in trigger["confkey"]:
+                    attname = atts[(trigger["confrelid"], attnum)]["attname"]
+                    attnames.append(attname)
+            trigger["attnames"] = attnames
+
+    return triggers
 
 
 def load_models(path):
@@ -251,11 +168,13 @@ def load_models(path):
         model_dict[model.ou_name] = model
     return model_dict
 
+##################################################################################
+# Get query OUs from postgres and perform feature augmentation
+##################################################################################
 
-query_cache = {}
-def evaluate_query(conn, query):
-    if query in query_cache:
-        return copy.deepcopy(query_cache[query])
+def evaluate_query(conn, query, qcache):
+    if query in qcache:
+        return copy.deepcopy(qcache[query])
     else:
         matches = re.findall(r'(\$[0-9])', query)
         if len(matches) == 0:
@@ -286,7 +205,7 @@ def evaluate_query(conn, query):
                         accum_startup_cost += child_startup_cost
                     continue
                 if isinstance(value, list):
-                    # TODO(wz2): For now, we simply featurize a list[] with a numeric length.
+                    # FIXME(LIST): For now, we simply featurize a list[] with a numeric length.
                     # This is likely insufficient if the content of the list matters significantly.
                     ou[key + "_len"] = len(value)
                 ou[key] = value
@@ -299,330 +218,784 @@ def evaluate_query(conn, query):
             template_ous.append(ou)
             return cur_total_cost, cur_startup_cost
         extract_ou(features)
-        query_cache[query] = copy.deepcopy(template_ous)
+        qcache[query] = copy.deepcopy(template_ous)
         return template_ous
 
 
-def augment_single_ou(conn, ous, query, idxoid_table_map, tableoid_map, metadata, percents):
+def augment_ou_triggers(conn, ou, qcache, window_stats, index_table_map, table_oid_map, trigger_map):
+    trigger_ous = []
+    ou_type = OperatingUnit[ou["node_type"]]
+    for tgoid in ou["ModifyTable_ar_triggers"]:
+        trigger_info = trigger_map[tgoid]
+        if trigger_info['contype'] != 'f':
+            # UNIQUE constraints should be handled by indexes.
+            continue
+
+        if ou_type == OperatingUnit.ModifyTableInsert:
+            # 1644 is the hardcoded code for RI_FKey_check_ins.
+            assert trigger_info["tgfoid"] == 1644
+            frelname = table_oid_map[trigger_info["confrelid"]]
+            tgquery = f"SELECT 1 FROM {frelname} WHERE "
+
+            for i, attname in enumerate(trigger_info["attnames"]):
+                if i != 0:
+                    tgquery = tgquery + " AND "
+                # FIXME(TRIGGER): We currently use a placeholder value. We could try installing the true values in
+                # since we are operating under the assumption that it succeeds.
+                tgquery = tgquery + f"{attname} = '0'"
+
+            # Get the OUs for the trigger query plan and compute the derived OUs.
+            tgous = evaluate_query(conn, tgquery, qcache)
+            ous, (_, idx_insert) = augment_single_query(conn, None, tgous, qcache, window_stats, index_table_map, table_oid_map, trigger_map)
+            assert idx_insert == 0, "Trigger should not generate an index insert."
+            trigger_ous.extend(ous)
+        elif ou_type == OperatingUnit.ModifyTableUpdate:
+            # Assert that the UPDATE/DELETE is basically a no-op
+            # FIXME(TRIGGER): We assume that UPDATE/DELETE will not trigger FK enforcement.
+            assert trigger_info['confupdtype'] == 'a'
+        else:
+            assert ou_type == OperatingUnit.ModifyTableDelete
+            assert trigger_info['confdeltype'] == 'a'
+    return trigger_ous
+
+
+def augment_single_query(conn, query, ous, qcache, window_stats, index_table_map, table_oid_map, trigger_map):
+    # Finds a matching key in the dict other using "in".
     def get_key(key, other):
         for subst_key in other:
             if key in subst_key:
                 return other[subst_key]
         assert False, f"Could not find {key} in {other}"
 
-    def get_plan_rows_matching_plan_id(plan_id):
-        for target_ou in ous:
-            if target_ou["plan_node_id"] == plan_id:
-                for k in target_ou:
-                    if "iterator_used" in k:
-                        return target_ou[k]
-                return get_key("plan_plan_rows", target_ou)
-        assert False, f"Could not find plan node with {plan_id}"
-
-    def exist_ou_with_child_plan_id(ou, plan_id):
+    # Returns a matching OU that has child_plan_id as either left or right child.
+    def exist_ou_with_child_plan_id(target_ou_type, child_plan_id):
         for target_ou in ous:
             ou_type = OperatingUnit[target_ou["node_type"]]
-            if ou == ou_type and (target_ou["left_child_node_id"] == plan_id or target_ou["right_child_node_id"] == plan_id):
+            if target_ou_type == ou_type and (target_ou["left_child_node_id"] == child_plan_id or target_ou["right_child_node_id"] == child_plan_id):
                 return target_ou
         return None
 
+    # Returns the number of rows output by a plan. Uses the iterator_used if available.
+    # Otherwise defaults to plan_rows.
+    def get_plan_rows_matching_plan_id(plan_id):
+        for target_ou in ous:
+            if target_ou["plan_node_id"] == plan_id:
+                for key in target_ou:
+                    if "iterator_used" in key:
+                        # This is a special means to get the iterator_used key if available.
+                        return target_ou[key]
+
+                return get_key("plan_plan_rows", target_ou)
+        assert False, f"Could not find plan node with {plan_id}"
+
     new_ous = []
-    def gen_idx_inserts(ou):
-        addt_ous = []
-        for idxoid in ou["ModifyTable_indexupdates_oids"]:
-            idx_name = metadata['pg_class_lookup'][idxoid]
-            idx_metadata = metadata['pg_class'][idx_name]
-            keys_per_page = 8192 / idx_metadata["est_key_size"]
-            if not "inserts" in idx_metadata:
-                idx_metadata["inserts"] = 0
-            idx_metadata["inserts"] = idx_metadata["inserts"] + 1
-            split = (idx_metadata["inserts"] % (keys_per_page / 2)) == 0
+    indexes_modify = ([], 0)
 
-            # FIXME(INDEX): Need to use an index learned percentage here.
-            addt_ous.append({
-                'node_type': OperatingUnit.ModifyTableIndexInsert.name,
-                'ModifyTableIndexInsert_indexid': idxoid,
-                'plan_node_id': -1,
-                # Indicate we split, assume at most one split. Assume split always triggers a relation extend!
-                'ModifyTableIndexInsert_num_splits': int(split),
-                'ModifyTableIndexInsert_num_extends': int(split),
-            })
-        return addt_ous
-
+    # Augment the static OU features with the "dynamic" execution features.
+    # These features are defined in behavior/__init__.py.
     for ou in ous:
         ou_type = OperatingUnit[ou["node_type"]]
         if ou_type == OperatingUnit.IndexOnlyScan or ou_type == OperatingUnit.IndexScan:
             prefix = "IndexOnlyScan" if ou_type == OperatingUnit.IndexOnlyScan else "IndexScan"
-            tbl = idxoid_table_map[ou[prefix + "_indexid"]]
+            tbl = index_table_map[ou[prefix + "_indexid"]]
+
+            # Set the number of outer loops to 1 by default. This will be fixed in the second pass for NestLoop.
             ou[f"{prefix}_num_outer_loops"] = 1.0
 
-            limit_ou = exist_ou_with_child_plan_id(OperatingUnit.Limit, ou["plan_node_id"])
-            if limit_ou is not None:
-                # In the case where there is a LIMIT directly above us, only fetch the Limit.
-                ou[f"{prefix}_num_iterator_used"] = get_key("plan_rows", limit_ou)
-            elif query is None or np.isnan(getattr(query, f"{tbl}_pk_output")):
+            if query is None or np.isnan(getattr(query, f"{tbl}_pk_output")):
+                # Case when we don't have a valid {tbl}_pk_output column that we can use.
                 ou[f"{prefix}_num_iterator_used"] = get_key("plan_rows", ou)
             else:
                 ou[f"{prefix}_num_iterator_used"] = getattr(query, f"{tbl}_pk_output")
-            ou[f"{prefix}_num_defrag"] = int(random.uniform(0, 1) <= (percents[tbl]["defrag_percent"] * ou[f"{prefix}_num_iterator_used"]))
+
+            limit_ou = exist_ou_with_child_plan_id(OperatingUnit.Limit, ou["plan_node_id"])
+            if limit_ou is not None:
+                # In the case where there is a LIMIT directly above us, then we only fetch up to the Limit.
+                # So take the min of whatever the num_iterator_used is set to and the plan_rows from the Limit.
+                ou[f"{prefix}_num_iterator_used"] = min(ou[f"{prefix}_num_iterator_used"], get_key("plan_rows", limit_ou))
+
+            # Set the num_defrag from defrag_percent which is normalized against number of tuples touched.
+            ou[f"{prefix}_num_defrag"] = int(random.uniform(0, 1) <= (window_stats[tbl]["defrag_percent"] * ou[f"{prefix}_num_iterator_used"]))
+
         elif ou_type == OperatingUnit.Agg:
             # The number of input rows is the number of rows output by the child.
             ou["Agg_num_input_rows"] = get_plan_rows_matching_plan_id(ou["left_child_node_id"])
+
         elif ou_type == OperatingUnit.DestReceiverRemote:
-            ou["DestReceiverRemote_num_output"] = get_key("plan_rows", ou)
+            # Number output is controlled by the output of plan node 0.
+            ou["DestReceiverRemote_num_output"] = get_plan_rows_matching_plan_id(0)
+
         elif ou_type == OperatingUnit.ModifyTableDelete:
             assert not np.isnan(query.num_modify)
+            # Find the indexes that the ModifyTableDelete might effect.
+            tbl = table_oid_map[ou["ModifyTable_target_oid"]]
+            indexes = [idx for idx, t in index_table_map.items() if t == tbl]
+
             ou["ModifyTableDelete_num_deletes"] = query.num_modify
+            new_ous.extend(augment_ou_triggers(conn, ou, qcache, window_stats, index_table_map, table_oid_map, trigger_map))
+            indexes_modify = (indexes, query.num_modify)
+
         elif ou_type == OperatingUnit.ModifyTableUpdate:
             assert not np.isnan(query.num_modify)
-            tbl = tableoid_map[ou["ModifyTable_target_oid"]]
+            tbl = table_oid_map[ou["ModifyTable_target_oid"]]
             ou["ModifyTableUpdate_num_updates"] = query.num_modify
             ou["ModifyTableUpdate_num_extends"] = 0
             ou["ModifyTableUpdate_num_hot"] = 0
+
+            num_index_inserts = 0
             for _ in range(int(query.num_modify)):
-                if random.uniform(0, 1) <= (percents[tbl]["hot_percent"]):
-                    # This is a HOT update...
+                if random.uniform(0, 1) <= (window_stats[tbl]["hot_percent"]):
+                    # We have performed a HOT update.
                     ou["ModifyTableUpdate_num_hot"] = ou["ModifyTableUpdate_num_hot"] + 1
                 else:
-                    if random.uniform(0, 1) <= (percents[tbl]["extend_percent"]):
+                    if random.uniform(0, 1) <= (window_stats[tbl]["extend_percent"]):
+                        # We have performed a relation extend.
                         ou["ModifyTableUpdate_num_extends"] = ou["ModifyTableUpdate_num_extends"] + 1
-                    new_ous.extend(gen_idx_inserts(ou))
+                    num_index_inserts = num_index_inserts + 1
+            new_ous.extend(augment_ou_triggers(conn, ou, qcache, window_stats, index_table_map, table_oid_map, trigger_map))
+
+            if num_index_inserts > 0:
+                indexes_modify = (ou["ModifyTable_indexupdates_oids"], num_index_inserts)
+
         elif ou_type == OperatingUnit.ModifyTableInsert:
-            tbl = tableoid_map[ou["ModifyTable_target_oid"]]
+            tbl = table_oid_map[ou["ModifyTable_target_oid"]]
             ou["ModifyTableInsert_num_extends"] = 0
-            if random.uniform(0, 1) <= percents[tbl]["extend_percent"]:
+            if random.uniform(0, 1) <= window_stats[tbl]["extend_percent"]:
+                # We have performed a relation extend.
                 ou["ModifyTableInsert_num_extends"] = 1
-            new_ous.extend(gen_idx_inserts(ou))
 
-            for tgoid in ou["ModifyTable_ar_triggers"]:
-                trigger_info = metadata['pg_trigger'][tgoid]
-                if trigger_info['contype'] != 'f':
-                    # UNIQUE constraints should be handled by indexes.
-                    continue
+            # Check and generate OUs.
+            new_ous.extend(augment_ou_triggers(conn, ou, qcache, window_stats, index_table_map, table_oid_map, trigger_map))
+            indexes_modify = (ou["ModifyTable_indexupdates_oids"], 1)
 
-                # 1644 is the hardcoded code for RI_FKey_check_ins.
-                assert trigger_info["tgfoid"] == 1644
-                frelname = metadata["pg_class_lookup"][trigger_info["confrelid"]]
-                tgquery = f"SELECT 1 FROM {frelname} WHERE "
-
-                for i, attnum in enumerate(trigger_info["confkey"]):
-                    search = (trigger_info["confrelid"], attnum)
-                    att_info = metadata["pg_attribute"][search]
-                    if i != 0:
-                        tgquery = tgquery + " AND "
-                    # TODO(wz2): We currently use a placeholder value. Implication is that for certain cardinalities, this is bust.
-                    tgquery = tgquery + f"{att_info['attname']} = '0'";
-
-                # Get the OUs for the trigger query plan and compute the derived OUs.
-                tgous = evaluate_query(conn, tgquery)
-                new_ous.extend(augment_single_ou(conn, tgous, None, idxoid_table_map, tableoid_map, metadata, percents))
-
+    # We've now went through and set all the base table scans. We now handle all the other OUs
+    # that might rely on that information (i.e., NestLoop joins).
     for ou in ous:
         ou_type = OperatingUnit[ou["node_type"]]
         if ou_type == OperatingUnit.IndexOnlyScan or ou_type == OperatingUnit.IndexScan:
             prefix = "IndexOnlyScan" if ou_type == OperatingUnit.IndexOnlyScan else "IndexScan"
             for other_ou in ous:
+                # See if there's a NestLoop OU that has us as the inner child (right).
                 if other_ou["node_type"] == OperatingUnit.NestLoop.name and other_ou["right_child_node_id"] == ou["plan_node_id"]:
+                    # Then set out num_outer_loops to the number of rows output by the left child.
                     ou[f"{prefix}_num_outer_loops"] = get_plan_rows_matching_plan_id(other_ou["left_child_node_id"])
+                    # Adjust num_iterator_used so it is a "per-iterator" estimate.
                     ou[f"{prefix}_num_iterator_used"] = max(1.0, ou[f"{prefix}_num_iterator_used"] / ou[f"{prefix}_num_outer_loops"])
                     break
         elif ou_type == OperatingUnit.NestLoop:
-            # Number of outer rows is the rows output by the left plan child.
             ou["NestLoop_num_outer_rows"] = get_plan_rows_matching_plan_id(ou["left_child_node_id"])
             ou["NestLoop_num_inner_rows_cumulative"] = get_plan_rows_matching_plan_id(ou["right_child_node_id"]) * ou["NestLoop_num_outer_rows"]
 
     new_ous.extend(ous)
-    return new_ous
+    return new_ous, indexes_modify
 
+##################################################################################
+# Generation of query OUs and state modification
+##################################################################################
 
-def generate_query_ous(conn, scratch, window_stats, idxoid_table_map, tableoid_map, metadata):
-    tmp_data_dir = scratch / "ous"
-    Path(tmp_data_dir).mkdir(parents=True, exist_ok=True)
-    if Path(tmp_data_dir / "done").exists():
-        return
-
-    # Accumulator for all the OU features.
-    ou_features = {ou.name: [] for ou in OperatingUnit}
-    output_counter = 0
-    num_added = 0
-
-    def accumulate_ou(ou):
-        nonlocal num_added
-        nonlocal output_counter
-        nonlocal ou_features
-        ou_features[ou["node_type"]].append(ou)
-        num_added += 1
-
-        if num_added >= 1024 * 1024:
-            for key in ou_features:
-                if len(ou_features[key]) > 0:
-                    filename = tmp_data_dir / f"{key}.feather.{output_counter}"
-                    pd.DataFrame(ou_features[key]).to_feather(filename)
-            ou_features = {ou.name: [] for ou in OperatingUnit}
-            output_counter += 1
-            num_added = 0
-
-    key_fn = lambda x: int(x.split(".feather")[0].split("_")[-1])
-    chunks = scratch / "chunks"
-    chunk_files = sorted(glob.glob(f"{chunks}/chunk_*"), key=key_fn)
-    ou_files = scratch / "ous"
-    Path(ou_files).mkdir(parents=True, exist_ok=True)
-    for chunk_file in chunk_files:
-        logger.info("Processing query operating units for %s", chunk_file)
-        chunk_stats = window_stats[key_fn(chunk_file)]
-        chunk = pd.read_feather(chunk_file)
-
-        pbar = tqdm(total=chunk.shape[0])
-        for cgrp in chunk.groupby(by=["query_text"]):
-            for i, tup in enumerate(cgrp[1].itertuples()):
-                ous = evaluate_query(conn, cgrp[0])
-                ous = augment_single_ou(conn, ous, tup, idxoid_table_map, tableoid_map, metadata, chunk_stats) 
-                for ou in ous:
-                    ou["query_id"] = tup.query_id
-                    ou["query_order"] = tup.query_order
-                    # FIXME(INTERVAL): what interval is this data executing in??
-                    ou["unix_timestamp"] = float(0)
-                    ou["PLOT_TS"] = tup.statement_timestamp
-                    accumulate_ou(ou)
-                pbar.update(1)
-        pbar.close()
-
-    for key in ou_features:
-        if len(ou_features[key]) > 0:
-            filename = tmp_data_dir / f"{key}.feather.{output_counter}"
-            pd.DataFrame(ou_features[key]).to_feather(filename)
-
-    open(tmp_data_dir / "done", "w").close()
-
-
-def slice_windows(conn, input_dir, slice_window, TABLES, ff_tbl_change_map, pg_class, table_attr_map, table_keyspace_map, scratch, workload_model):
-    # Load the initial data map.  data_map = {}
-    data_map = {}
-    for tbl in TABLES:
-        if len(table_attr_map[tbl]) == 0:
+def implant_stats_to_postgres(conn, stats):
+    for tbl, data in stats.items():
+        if tbl == "chunk_num":
+            # There is this dummy key.
             continue
 
-        pks_sel = ",".join(table_attr_map[tbl])
-        result = conn.execute(f"SELECT {pks_sel} FROM {tbl}", prepare=False)
-        frame = pd.DataFrame(result, columns=table_attr_map[tbl])
-        data_map[tbl] = frame
+        relpages = int(math.ceil(data["table_len"] / 8192))
+        reltuples = data["approx_tuple_count"]
 
-    # Get the initial state of the pgstattuple.
-    table_state = {}
-    for tbl in TABLES:
-        result = [r for r in conn.execute(f"SELECT * FROM pgstattuple_approx('{tbl}')", prepare=False)][0]
-        table_state[tbl] = {
-                "table_len": result[0],
-                "approx_free_percent": result[9],
-                "dead_tuple_percent": result[7],
-                "approx_tuple_count": result[2],
-                "tuple_len_avg": result[3] / result[2],
-                "ff": pg_class[tbl]["fillfactor"] * 100.0,
-            }
+        # FIXME(INDEX): This is a back of the envelope estimation for the index height.
+        height = 0
+        if data["tuple_len_avg"] > 0:
+            fanout = (8192 / data["tuple_len_avg"])
+            height = math.ceil(np.log(relpages) / np.log(fanout))
 
-    # Mutate the table state based on the queries.
-    def mutate_table_state(tbl, table_state, queries, extend_percent, hot_percent):
-        if queries.shape[0] == 0:
-            return table_state
+        # FIXME(STATS): Should we try and fake the histogram?
+        query = f"SELECT qss_install_stats('{tbl}', {relpages}, {reltuples}, {height})"
+        conn.execute(query, prepare=False)
 
-        num_insert = queries[queries.is_insert].num_modify.sum()
-        num_delete = queries[queries.is_delete].num_modify.sum()
-        num_update = queries[queries.OP == "UPDATE"].num_modify.sum()
-        new_tuple_count = max(0, table_state["approx_tuple_count"] + num_insert - num_delete)
 
-        num_hot = min(num_update, int(num_update * hot_percent))
-        num_extend = extend_percent * (num_insert + num_update - num_hot)
-        # Each update tuple incurs a somewhat "dead tuple".
-        # But we have no idea about defrags...
-        new_dead_tuples = (table_state["dead_tuple_percent"] * table_state["table_len"] / table_state["tuple_len_avg"]) + (num_delete + num_update)
-        new_table_len = table_state["table_len"] + num_extend * 8192
+def mutate_table_window_state(tbl, pre_table_state, queries, ff_tbl_change_map, use_workload_table_estimates):
+    if queries.shape[0] == 0:
+        return pre_table_state
 
-        table_state["table_len"] = new_table_len
-        table_state["approx_tuple_count"] = new_tuple_count
-        # Dead tuple percent is relative to the total table len.
-        table_state["dead_tuple_percent"] = new_dead_tuples / new_table_len
-        # Approximate free is take the number of "available" and divide it by "# alive and # dead".
-        table_state["approx_free_percent"] = max(0.0, 1 - (new_table_len / table_state["tuple_len_avg"]) / (new_tuple_count + new_dead_tuples))
-        # FIXME(TUPLEN): Should we update the tuple length average? Assume it doesn't change, I guess. OR we'd have to estimate it. uh-oh.
+    num_insert = queries[queries.is_insert].num_modify.sum()
+    num_delete = queries[queries.is_delete].num_modify.sum()
+    num_update = queries[queries.OP == "UPDATE"].num_modify.sum()
+    num_hot = num_update * min(1.0, max(0.0, pre_table_state["hot_percent"]))
+    assert num_hot <= num_update
 
-        if tbl in ff_tbl_change_map:
-            # Mutate the fill factor based on when we know the ALTER TABLE was executed.
-            slots = ff_tbl_change_map[tbl]
-            for (ts, ff) in slots:
-                if np.sum(queries.statement_timestamp >= ts) > 0:
-                    table_state["ff"] = ff
-                    break
-        return table_state
+    if use_workload_table_estimates:
+        delta_tuple_count = pre_table_state["norm_delta_tuple_count"] * (num_insert + num_delete) / NORM_RELATIVE_OPS
+        delta_table_len = max(0, pre_table_state["norm_delta_table_len"] * (num_insert + num_update) / NORM_RELATIVE_OPS)
+        delta_free_percent = pre_table_state["norm_delta_free_percent"] * (num_insert + num_update + num_delete) / NORM_RELATIVE_OPS
+        delta_dead_percent = pre_table_state["norm_delta_dead_percent"] * (num_insert + num_update + num_delete) / NORM_RELATIVE_OPS
 
-    chunks = scratch / "chunks"
-    chunks.mkdir(parents=True, exist_ok=True)
-    if not Path(scratch / "chunk_stats").exists():
-        loader = Loader(input_dir, slice_window, TABLES)
-        chunk, augment_chunk = loader.get_next_slice()
+        est_tuple_count = max(0, pre_table_state["approx_tuple_count"] + delta_tuple_count)
+        new_tuple_count = max(0, min(est_tuple_count, pre_table_state["approx_tuple_count"] + num_insert - num_delete))
+    else:
+        new_tuple_count = max(0, pre_table_state["approx_tuple_count"] + num_insert - num_delete)
 
-        qnum = 0
-        chunk_num = 0
-        input_features = []
-        window_stats = []
-        while chunk is not None:
-            logger.info("Processing chunk: %s with window size %s", chunk_num, slice_window)
-            chunk["query_order"] = chunk.index + qnum
-            chunk_window_stats = {}
-            # Group by target from augment_chunk which is the keyspace defining chunk.
-            for group in augment_chunk.groupby(by=["target"]):
-                tbl = group[0]
-                keyspace = []
-                if tbl in table_keyspace_map and tbl in table_keyspace_map[tbl]:
-                    keyspace = table_keyspace_map[tbl][tbl]
+    # Generate aggressively on the larger end so we can bound the model predictions.
+    num_extend = (num_insert + num_update - num_hot) * min(1.0, max(0, pre_table_state["extend_percent"]))
+    if use_workload_table_estimates:
+        new_table_len = pre_table_state["table_len"] + min(num_extend * 8192, delta_table_len)
+    else:
+        new_table_len = pre_table_state["table_len"] + max(0, num_extend * 8192)
 
-                data = data_map[group[0]].copy() if group[0] in data_map else None
-                inputs = WorkloadModel.featurize(group[1], data, table_state[tbl], keyspace, train=False)
-                inputs = workload_model.prepare_inputs(pd.DataFrame([inputs]), train=False)
-                batch = next(iter(torch.utils.data.DataLoader(inputs, batch_size=1)))
+    new_dead_tuples = (pre_table_state["dead_tuple_percent"] * pre_table_state["table_len"] / pre_table_state["tuple_len_avg"]) + (num_delete + num_update)
+    est_dead_tuple_percent = (new_dead_tuples * pre_table_state["tuple_len_avg"]) / new_table_len
+    est_free_tuple_percent = max(0.0, min(1.0, 1 - (new_tuple_count + new_dead_tuples) / (new_table_len / pre_table_state["tuple_len_avg"])))
 
-                predictions = workload_model.predict(*batch)
-                extend_percent, defrag_percent, hot_percent = predictions[0][0].item(), predictions[0][1].item(), predictions[0][2].item()
-                chunk_window_stats[tbl] = {
-                    "extend_percent": min(1.0, max(0.0, extend_percent)),
-                    "defrag_percent": min(1.0, max(0.0, defrag_percent)),
-                    "hot_percent": min(1.0, max(0.0, hot_percent)),
+    pre_table_state["table_len"] = new_table_len
+    pre_table_state["approx_tuple_count"] = new_tuple_count
+
+    if use_workload_table_estimates:
+        # Since our estimates are on the larger for "deadness" tuples, they provide a "higher bound" of sorts for deadness.
+        pre_table_state["dead_tuple_percent"] = max(0, min(1, min(est_dead_tuple_percent, pre_table_state["dead_tuple_percent"] + delta_dead_percent)))
+        # Since our estimates are on the larger for affected tuples, they provide a "lower bound" of sorts for the free percentages.
+        pre_table_state["approx_free_percent"] = max(0, min(1, min(est_free_tuple_percent, pre_table_state["approx_free_percent"] + delta_free_percent)))
+    else:
+        pre_table_state["dead_tuple_percent"] = max(0, min(1, est_dead_tuple_percent))
+        pre_table_state["approx_free_percent"] = max(0, min(1, est_free_tuple_percent))
+
+    assert pre_table_state["dead_tuple_percent"] >= 0 and pre_table_state["dead_tuple_percent"] <= 1
+    assert pre_table_state["approx_free_percent"] >= 0 and pre_table_state["approx_free_percent"] <= 1
+
+    if tbl in ff_tbl_change_map and queries.shape[0] > 0:
+        # Mutate the fill factor based on when we know the ALTER TABLE was executed.
+        slots = ff_tbl_change_map[tbl]
+        for (ts, ff) in reversed(slots):
+            if queries.iloc[-1].statement_timestamp >= ts:
+                # We have found a new fill-factor boundary. We want to traverse slots() in reverse since
+                # we want to find the "last" ff setting that is valid (since slots is sorted in increasing
+                # time order). If it's greater than slots[2], then it is greater than slots[1].
+                pre_table_state["ff"] = ff
+                break
+
+    return pre_table_state
+
+
+def generate_index_inserts(chunk_num, chunk, augment_chunk, keyspace_augs, index_keyspace_map, index_stats, scratch_ou):
+    total = functools.reduce(lambda a,b: a+b, map(lambda x: len(x[1]), keyspace_augs.items()))
+    pbar = tqdm(total=total)
+
+    idx_insert_ous = []
+    chunk.set_index(keys=["query_order"], inplace=True)
+    augment_chunk.set_index(keys=["query_order"], inplace=True)
+    for index_keyspace, v in keyspace_augs.items():
+        index_name = index_keyspace_map[index_keyspace][0]
+        if len(v) == 0:
+            continue
+
+        idx_ins = pd.DataFrame(v)
+        assert idx_ins.target_index_name.nunique() == 1
+        idx_ins.set_index(keys=["query_order"], inplace=True)
+        augs = augment_chunk.join(idx_ins, how="inner")
+
+        # FIXME(INDEX): Need to use the workload model in order to featurize [augs].
+        # With the featurized [augs] we can then get a [% extend, % split].
+
+        augs = chunk.join(idx_ins, how="inner")
+        augs.reset_index(drop=False, inplace=True)
+        augs = augs[~augs.target_index_modify_tuples.isna()]
+
+        # These are the "index" got touched probes.
+        pbar.update(idx_ins.shape[0] - augs.shape[0])
+
+        # We remove the "DELETEs" since they don't trigger ModifyTableIndexInsert.
+        total_mods = augs.shape[0]
+        augs = augs[~augs.is_delete]
+        num_deletes = total_mods - augs.shape[0]
+        pbar.update(num_deletes)
+
+        total_split = 0
+        for aug in augs.itertuples():
+            assert not aug.is_delete
+
+            num_splits = 0
+            index_stats[index_name]["num_inserts"] = index_stats[index_name]["num_inserts"] + 1
+            if (index_stats[index_name]["num_inserts"] % int((8192 / index_stats[index_name]["tuple_len_avg"]) / 2) == 0):
+                num_splits = 1
+                total_split = total_split + 1
+
+            idx_insert_ous.append({
+                'query_id': aug.query_id,
+                'query_order': aug.query_order,
+                'window_slice': chunk_num,
+                'node_type': OperatingUnit.ModifyTableIndexInsert.name,
+                'ModifyTableIndexInsert_indexid': index_keyspace,
+                'plan_node_id': -1,
+                'ModifyTableIndexInsert_num_extends': num_splits,
+                'ModifyTableIndexInsert_num_splits': num_splits,
+            })
+            pbar.update(1)
+
+        # FIXME(INDEX): We need to adjust the state of the index_stats for the workload model.
+        index_stats[index_name]["table_len"] = index_stats[index_name]["table_len"] + total_split * 8192
+        # augs.shape[0] is the number of inserts caused by inserts/updates.
+        index_stats[index_name]["approx_tuple_count"] = max(0, index_stats[index_name]["approx_tuple_count"] + augs.shape[0] - num_deletes)
+
+    pbar.close()
+
+    chunk.reset_index(drop=False, inplace=True)
+    augment_chunk.reset_index(drop=False, inplace=True)
+    pd.DataFrame(idx_insert_ous).to_feather(f"{scratch_ou}/ModifyTableIndexInsert.feather.{chunk_num}")
+    del idx_insert_ous
+
+
+def generate_ous_for_chunk(conn, workload_model, chunk_num, chunk,
+                           augment_chunk, window_stats, index_stats,
+                           index_table_map, index_keyspace_map, table_oid_map, trigger_map, scratch_ou):
+    ou_features = {ou.name: [] for ou in OperatingUnit}
+    keyspace_augs = {t: [] for t in index_keyspace_map.keys()}
+
+    pbar = tqdm(total=chunk.shape[0])
+    query_cache = {}
+    for i, query in enumerate(chunk.itertuples()):
+        # Get the OUs for evaluating the query.
+        ous = evaluate_query(conn, query.query_text, query_cache)
+
+        # Augment all the OUs.
+        ous, (idxs, idx_insert) = augment_single_query(conn, query, ous, query_cache, window_stats, index_table_map, table_oid_map, trigger_map)
+
+        # Add the OU features that we constructed.
+        for ou in ous:
+            ou["query_id"] = query.query_id
+            ou["query_order"] = query.query_order
+            ou["window_slice"] = chunk_num
+            ou_features[ou["node_type"]].append(ou)
+
+            ou_type = OperatingUnit[ou["node_type"]]
+            if ou_type == OperatingUnit.IndexOnlyScan or ou_type == OperatingUnit.IndexScan:
+                # We are using an index that is in index_keyspace_map for analysis.
+                prefix = "IndexOnlyScan" if ou_type == OperatingUnit.IndexOnlyScan else "IndexScan"
+                indexid = ou[prefix + "_indexid"]
+                if indexid in index_keyspace_map:
+                    keyspace_augs[indexid].append({
+                        "query_order": query.query_order,
+                        "target_index_name": index_keyspace_map[indexid][0],
+                        "target_index_modify_tuples": np.nan,
+                    })
+            elif ou_type == OperatingUnit.ModifyTableInsert or ou_type == OperatingUnit.ModifyTableUpdate or ou_type == OperatingUnit.ModifyTableDelete:
+                # We are using an index (for insert/update/delete) that is in index_keyspace_map for analysis.
+                for idx in idxs:
+                    keyspace_augs[idx].append({
+                        "query_order": query.query_order,
+                        "target_index_name": index_keyspace_map[idx][0],
+                        "target_index_modify_tuples": idx_insert,
+                    })
+        pbar.update(1)
+    pbar.close()
+    del query_cache
+
+    # Output all the OU features that have data.
+    for key in ou_features:
+        if len(ou_features[key]) > 0:
+            filename = f"{scratch_ou}/{key}.feather.{chunk_num}"
+            pd.DataFrame(ou_features[key]).to_feather(filename)
+
+    del ou_features
+
+    # Generate all the index related operations.
+    generate_index_inserts(chunk_num, chunk, augment_chunk, keyspace_augs, index_keyspace_map, index_stats, scratch_ou)
+    del keyspace_augs
+
+
+def generate_query_ous(conn, compute_frames, use_workload_table_estimates, input_dir, tables, workload_model, ff_change_map, index_table_map, index_keyspace_map, table_oid_map, trigger_map, scratch_ous):
+    if Path(f"{scratch_ous}/ou_done").exists():
+        return
+
+    # We assumed that we have already processed the window slices in a preceding step.
+    # Here we just have to load them, compute relevant aspects and then voila!
+
+    # We don't have a good way of ensuring that keyspace_metadata_read and the inputs are consistent.
+    # Do your due diligence.
+    table_attr_map, _, table_keyspace_map, _, _, _ = keyspace_metadata_read(f"{input_dir}/analysis")
+    key_fn = lambda x: int(x.split("_")[-1])
+    chunks = sorted(glob.glob(f"{input_dir}/snippets/chunk_*"), key=key_fn)
+
+    data_map = {}
+    window_stats = {"chunk_num": 0}
+    index_stats = {"chunk_num": 0}
+
+    # Find the last processed chunk and skip them.
+    if Path(f"{scratch_ous}/state.pickle").exists():
+        with open(f"{scratch_ous}/state.pickle", "rb") as f:
+            window_stats = pickle.load(f)
+            index_stats = pickle.load(f)
+
+        if compute_frames:
+            # Load the frame if it exists.
+            for tbl in tables:
+                if Path(f"{scratch_ous}/{tbl}.feather").exists():
+                    data_map[tbl] = pd.read_feather(f"{scratch_ous}/{tbl}.feather")
+        else:
+            # Otherwise construct the correct visible table map.
+            for tbl in tables:
+                start = window_stats["chunk_num"]
+                while start >= 0 and not Path(f"{input_dir}/snippets/chunk_{start}/{tbl}.feather").exists():
+                    start = start - 1
+
+                if Path(f"{input_dir}/snippets/chunk_{start}/{tbl}.feather").exists():
+                    data_map[tbl] = pd.read_feather(f"{input_dir}/snippets/chunk_{start}/{tbl}.feather")
+
+        chunks = chunks[window_stats["chunk_num"]:]
+    else:
+        # Here we assume that the "initial" state with which populate_data() was invoked with
+        # and the state at which the query stream was captured is roughly consistent (along
+        # with the state at which we are assessing pgstattuple_approx) to some degree.
+        with conn.cursor(row_factory=dict_row) as cursor:
+            for tbl in tables:
+                result = [r for r in cursor.execute(f"SELECT * FROM pgstattuple_approx('{tbl}')", prepare=False)][0]
+                pgc_record = [r for r in cursor.execute(f"SELECT * FROM pg_class where relname = '{tbl}'", prepare=False)][0]
+
+                ff = 100
+                if pgc_record["reloptions"] is not None:
+                    for record in pgc_record["reloptions"]:
+                        for key, value in re.findall(r'(\w+)=(\w*)', record):
+                            if key == "fillfactor":
+                                ff = float(value)
+                                break
+
+                window_stats[tbl] = {
+                    "table_len": result["table_len"],
+                    "approx_free_percent": result["approx_free_percent"] / 100.0,
+                    "dead_tuple_percent": result["dead_tuple_percent"] / 100.0,
+                    "approx_tuple_count": result["approx_tuple_count"],
+                    "tuple_len_avg": result["approx_tuple_len"] / result["approx_tuple_count"],
+                    "ff": ff,
+                 }
+
+            for _, (idx, _) in index_keyspace_map.items():
+                result = [r for r in cursor.execute(f"SELECT * FROM pgstattuple('{idx}')", prepare=False)][0]
+                index_stats[idx] = {
+                    "table_len": result["table_len"],
+                    "approx_tuple_count": result["tuple_count"],
+                    "tuple_len_avg": 0.0 if result["tuple_count"] == 0 else result["tuple_len"] / result["tuple_count"],
+                    "num_inserts": 0,
                 }
 
-                # Mutate the table state accordingly.
-                table_state[tbl] = mutate_table_state(tbl, table_state[tbl], chunk[(chunk.OP != "SELECT") & (chunk.modify_target == tbl)], extend_percent, hot_percent)
-            window_stats.append(chunk_window_stats)
+            with open(f"{scratch_ous}/state.pickle.0", "wb") as f:
+                pickle.dump(window_stats, f)
+                pickle.dump(index_stats, f)
 
-            # Update the data map based on the modify target of the actual queries.
-            for group in chunk.groupby(by=["modify_target"]):
-                tbl = group[0]
-                if tbl not in table_attr_map or tbl not in table_keyspace_map or tbl not in table_keyspace_map[tbl]:
-                    # No valid keys that are worth looking at.
-                    continue
+    for chunk in tqdm(chunks):
+        chunk_num = key_fn(chunk)
 
-                pk_keys = table_keyspace_map[tbl][tbl]
-                all_keys = table_attr_map[tbl]
-                data_map[tbl], _ = compute_frame(data_map[tbl], group[1], pk_keys, all_keys)
+        # If we aren't computing frames, look at if there are update frames to use.
+        if not compute_frames:
+            for tbl in tables:
+                if Path(f"{chunk}/{tbl}.feather").exists():
+                    data_map[tbl] = pd.read_feather(f"{chunk}/{tbl}.feather")
 
-            # Write out the slice.
-            chunk.to_feather(Path(chunks) / f"chunk_{chunk_num}.feather")
-            augment_chunk.to_feather(Path(chunks) / f"augchunk_{chunk_num}.feather")
-            qnum = qnum + chunk.shape[0]
+        # Perform a mind-trick on postgres.
+        conn.execute("SELECT qss_clear_stats()", prepare=False)
+        implant_stats_to_postgres(conn, window_stats)
+        implant_stats_to_postgres(conn, index_stats)
 
-            chunk_num = chunk_num + 1
-            chunk, augment_chunk = loader.get_next_slice()
+        augment_chunk = pd.read_feather(f"{chunk}/augment_chunk.feather")
+        assert np.sum(augment_chunk.target.isna()) == 0
+        assert np.sum(augment_chunk.target_index_name.isna()) == augment_chunk.shape[0]
+        assert np.sum(augment_chunk.num_modify.isna()) == 0.0
+        augment_chunk.drop(columns=["target_index_name"], inplace=True)
 
-        with open((scratch / "chunk_stats"), "wb") as f:
+        query_chunk = pd.read_feather(f"{chunk}/chunk.feather")
+        assert np.sum(query_chunk.target_index_name.isna()) == query_chunk.shape[0]
+        assert np.sum(query_chunk.num_modify.isna()) == 0.0
+        query_chunk.drop(columns=["target_index_name"], inplace=True)
+
+        for tbl, queries in augment_chunk.groupby(by=["target"]):
+            # Assert that we have only 1 target table.
+            assert "," not in tbl
+
+            keyspace = []
+            if tbl in table_keyspace_map and tbl in table_keyspace_map[tbl]:
+                keyspace = table_keyspace_map[tbl][tbl]
+
+            data = data_map[tbl].copy() if tbl in data_map else None
+            inputs = WorkloadModel.featurize(queries, data, window_stats[tbl], keyspace, train=False)
+            inputs = workload_model.prepare_inputs(pd.DataFrame([inputs]), train=False)
+            batch = next(iter(torch.utils.data.DataLoader(inputs, batch_size=1)))
+
+            prediction = workload_model.predict(*batch)[0]
+            for i, target in enumerate(MODEL_WORKLOAD_TARGETS):
+                window_stats[tbl][target] = prediction[i].item()
+
+                if target == "extend_percent" or target == "defrag_percent" or target == "hot_percent":
+                    window_stats[tbl][target] = max(0, min(1, window_stats[tbl][target]))
+
+        # Generate all the query operating units for this chunk.
+        generate_ous_for_chunk(conn, workload_model, chunk_num, query_chunk, augment_chunk, window_stats, index_stats, index_table_map, index_keyspace_map, table_oid_map, trigger_map, scratch_ous)
+
+        # Mutate all the table state.
+        for tbl, queries in augment_chunk.groupby(by=["target"]):
+            queries = queries[queries.OP != "SELECT"]
+            window_stats[tbl] = mutate_table_window_state(tbl, window_stats[tbl], queries, ff_change_map, use_workload_table_estimates)
+
+        # Compute the changes to the data map if needed.
+        if compute_frames:
+            join_map = {}
+            touched_tbls = {}
+            compute_frames_change(query_chunk, data_map, join_map, touched_tbls, table_attr_map, table_keyspace_map, logger)
+            del join_map
+            del touched_tbls
+
+            for tbl, frame in data_map.items():
+                # Write out a copy to facilitate restarts.
+                frame.reset_index(drop=False).to_feather(f"{scratch_ous}/{tbl}.feather")
+
+        next_chunk_num = chunk_num + 1
+        window_stats["chunk_num"] = next_chunk_num
+        index_stats["chunk_num"] = next_chunk_num
+        with open(f"{scratch_ous}/state.pickle", "wb") as f:
             pickle.dump(window_stats, f)
-    else:
-        with open((scratch / "chunk_stats"), "rb") as f:
-            window_stats = pickle.load(f)
+            pickle.dump(index_stats, f)
 
-    return window_stats
+        with open(f"{scratch_ous}/state.pickle.{next_chunk_num}", "wb") as f:
+            pickle.dump(window_stats, f)
+            pickle.dump(index_stats, f)
+
+    open(f"{scratch_ous}/ou_done", "w").close()
+
+##################################################################################
+# Attach metadata to query operating units
+##################################################################################
+
+def prepare_metadata(conn, scratch_it):
+    with conn.cursor(row_factory=dict_row) as cursor:
+        # Extract all the relevant settings that we care about.
+        cursor.execute("SHOW ALL;")
+        pg_settings = {}
+        for record in cursor:
+            setting_name = record["name"]
+            if setting_name in KNOBS:
+                # Map a pg_setting name to the setting value.
+                setting_type = KNOBS[setting_name]
+                setting_str = record["setting"]
+                pg_settings[setting_name] = _parse_field(setting_type, setting_str)
+
+        # FIXME(KNOBS): We assume that knobs can't change over time. Otherwise, we need to capture that.
+        pg_settings["time"] = 0.0
+        pg_settings["unix_timestamp"] = 0.0
+        pg_settings = pd.DataFrame([pg_settings])
+        pg_settings.set_index(keys=["unix_timestamp"], drop=True, append=False, inplace=True)
+        pg_settings.sort_index(axis=0, inplace=True)
+
+        # Now prep pg_attribute.
+        result = [r for r in cursor.execute("SELECT * FROM pg_attribute")]
+        for r in result:
+            r["time"] = 0.0
+        time_pg_attribute = process_time_pg_attribute(pd.DataFrame(result))
+
+        # FIXME(STATS): We assume that pg_stats doesn't change over time. Or more precisely, we know that the
+        # attributes from pg_stats that we care about don't change significantly over time (len / key type).
+        # If we start using n_distinct/correlation, then happy trials!
+        result = [r for r in cursor.execute("SELECT * FROM pg_stats")]
+        for r in result:
+            r["time"] = 0.0
+        time_pg_stats = process_time_pg_stats(pd.DataFrame(result))
+        time_pg_stats.set_index(keys=["unix_timestamp"], drop=True, append=False, inplace=True)
+        time_pg_stats.sort_index(axis=0, inplace=True)
+
+        # Now let's produce the pg_class entries.
+        key_fn = lambda x: int(x.split(".")[-1])
+        states = sorted(glob.glob(f"{scratch_it}/state.pickle.*"), key=key_fn)
+        result_cls = [r for r in cursor.execute("SELECT c.* FROM pg_class c, pg_namespace n WHERE c.relnamespace = n.oid AND n.nspname = 'public'")]
+        result_idx = [r for r in cursor.execute("SELECT i.*, c.relname FROM pg_index i, pg_class c WHERE i.indexrelid = c.oid")]
+        pg_class_total = []
+        pg_index_total = []
+        for state in states:
+            # Combine the stats together. We know that the names are unique.
+            with open(state, "rb") as f:
+                combined_stats = pickle.load(f)
+                combined_stats.update(pickle.load(f))
+
+            slice_num = key_fn(state)
+            for record in result_cls:
+                if "relname" in record and (record["relname"] in combined_stats):
+                    relname = record["relname"]
+                    record["reltuples"] = combined_stats[relname]["approx_tuple_count"]
+                    record["relpages"] = combined_stats[relname]["table_len"] / 8192
+                    record["time"] = (slice_num) * 1.0 * 1e6
+                    pg_class_total.append(copy.deepcopy(record))
+
+            for record in result_idx:
+                if record["relname"] in combined_stats:
+                    entry = copy.deepcopy(record)
+                    entry.pop("relname")
+                    entry["time"] = (slice_num) * 1.0 * 1e6
+                    pg_index_total.append(entry)
+
+    # Prepare all the augmented catalog data in timestamp order.
+    process_tables, process_idxs = process_time_pg_class(pd.DataFrame(pg_class_total))
+    process_pg_index = process_time_pg_index(pd.DataFrame(pg_index_total))
+    time_pg_index = build_time_index_metadata(process_pg_index, process_tables.copy(deep=True), process_idxs, time_pg_attribute)
+    return process_tables, time_pg_index, time_pg_stats, pg_settings
 
 
-def main(benchmark, psycopg2_conn, session_sql, dir_models, dir_workload_model, dir_data, slice_window, dir_evals_output, dir_scratch, eval_batch_size):
-    TABLES = BENCHDB_TO_TABLES[benchmark]
+def attach_metadata_ous(conn, scratch_it):
+    if ((scratch_it / "augment_query_ous")).exists():
+        return
 
+    # Get all the metadata in time order.
+    process_tables, process_index, process_stats, process_settings = prepare_metadata(conn, scratch_it)
+
+    # These are the INDEX OUs that require metadata augmentation.
+    for index_ou in [OperatingUnit.IndexScan, OperatingUnit.IndexOnlyScan, OperatingUnit.ModifyTableIndexInsert]:
+        column = {
+            OperatingUnit.IndexOnlyScan: "IndexOnlyScan_indexid",
+            OperatingUnit.IndexScan: "IndexScan_indexid",
+            OperatingUnit.ModifyTableIndexInsert: "ModifyTableIndexInsert_indexid"
+        }[index_ou]
+
+        key_fn = lambda x: int(x.split(".")[-1])
+        files = sorted(glob.glob(f"{scratch_it}/{index_ou.name}.feather.*"), key=key_fn)
+        for target_file in files:
+            if target_file.startswith("AUG"):
+                # This file has already been augmented somehow.
+                continue
+
+            logger.info("[AUGMENT] Input %s", target_file)
+            data = pd.read_feather(target_file)
+
+            # This is super confusing but essentially "time" is the raw time. `unix_timestamp` is the time adjusted to
+            # the correct unix_timestamp seconds. Essentially we want to join the unix_timestamp to window_slice
+            # which is how the code is setup.
+            #
+            # TODO(TIME): Simplify and unify this.
+            data["window_slice"] = data.window_slice.astype(np.float)
+            data.set_index(keys=["window_slice"], drop=True, append=False, inplace=True)
+            data.sort_index(axis=0, inplace=True)
+
+            settings_col = process_settings.columns[0]
+            data = pd.merge_asof(data, process_settings, left_index=True, right_index=True, allow_exact_matches=True)
+            # This guarantees that all the settings are matched up.
+            assert data[settings_col].isna().sum() == 0
+
+            data = pd.merge_asof(data, process_index, left_index=True, right_index=True, left_by=[column], right_by=["indexrelid"], allow_exact_matches=True)
+            # This guarantees that all the indexes are matched up.
+            assert data.indexrelid.isna().sum() == 0
+
+            indkey_atts = [key for key in data.columns if "indkey_attname_" in key]
+            for idx, indkey_att in enumerate(indkey_atts):
+                left_by = ["table_relname", indkey_att]
+                right_by = ["tablename", "attname"]
+                data = pd.merge_asof(data, process_stats, left_index=True, right_index=True, left_by=left_by, right_by=right_by, allow_exact_matches=True)
+
+                # Rename the key and drop the other useless columns.
+                data.drop(labels=["tablename", "attname"], axis=1, inplace=True)
+                remapper = {column:f"indkey_{column}_{idx}" for column in process_stats.columns}
+                data.rename(columns=remapper, inplace=True)
+
+            # Purify the index data.
+            data = purify_index_input_data(data)
+            data.reset_index(drop=True, inplace=True)
+            data.to_feather(scratch_it / f"AUG_{index_ou.name}.feather{Path(target_file).suffix}")
+
+    process_tables.set_index(keys=["unix_timestamp"], drop=True, append=False, inplace=True)
+    process_tables.sort_index(axis=0, inplace=True)
+    for augment in [OperatingUnit.ModifyTableInsert, OperatingUnit.ModifyTableUpdate]:
+        files = sorted(glob.glob(f"{scratch_it}/{augment.name}.feather.*"))
+        for target_file in files:
+            logger.info("[AUGMENT] Input %s", target_file)
+            data = pd.read_feather(target_file)
+            data["window_slice"] = data.window_slice.astype(np.float)
+            data.set_index(keys=["window_slice"], drop=True, append=False, inplace=True)
+            data.sort_index(axis=0, inplace=True)
+
+            data = pd.merge_asof(data, process_tables, left_index=True, right_index=True, left_by=["ModifyTable_target_oid"], right_by=["oid"], allow_exact_matches=True)
+            assert data.oid.isna().sum() == 0
+            data.reset_index(drop=False, inplace=True)
+            data.to_feather(scratch_it / f"AUG_{augment.name}.feather{Path(target_file).suffix}")
+
+    open(scratch_it / "augment_query_ous", "w").close()
+
+##################################################################################
+# Evaluation of query plans
+##################################################################################
+
+def evaluate_query_plans(base_models, queries, scratch_it, output_path, eval_batch_size):
+    if not Path(f"{scratch_it}/eval_done").exists():
+        # Evaluate all the OUs.
+        for ou in OperatingUnit:
+            ou_type = ou.name
+            key_fn = lambda x: int(x.split(".")[-1])
+            files = sorted(glob.glob(f"{scratch_it}/AUG_{ou.name}.feather.*"), key=key_fn)
+            if len(files) == 0:
+                files = sorted(glob.glob(f"{scratch_it}/{ou.name}.feather.*"), key=key_fn)
+
+            if len(files) == 0:
+                # This case is no data for the OU.
+                continue
+
+            def logged_read_feather(target):
+                logger.info("[^]: [LOAD] Input %s", target)
+                return pd.read_feather(target)
+
+            # Read each OU file in one by one and then evaluate it.
+            (scratch_it / "evals" / ou_type).mkdir(parents=True, exist_ok=True)
+            groupings = [files[i:i+eval_batch_size] for i in range(0,len(files),eval_batch_size)]
+            for i, group in enumerate(groupings):
+                df = pd.concat(map(logged_read_feather, group))
+                df.reset_index(drop=True, inplace=True)
+                if ou_type not in base_models:
+                    # If we don't have the model for the particular OU, we just predict 0.
+                    df["pred_elapsed_us"] = 0
+                    # Set a bit in [error_missing_model]
+                    df["error_missing_model"] = 1
+                else:
+                    df = evaluate_ou_model(base_models[ou_type], None, None, eval_df=df, return_df=True, output=False)
+                    df["error_missing_model"] = 0
+
+                    if OperatingUnit[ou_type] == OperatingUnit.IndexOnlyScan or OperatingUnit[ou_type] == OperatingUnit.IndexScan:
+                        prefix = "IndexOnlyScan" if OperatingUnit[ou_type] == OperatingUnit.IndexOnlyScan else "IndexScan"
+                        df["pred_elapsed_us"] = df.pred_elapsed_us * df[f"{prefix}_num_outer_loops"]
+                df.to_feather(scratch_it / "evals" / ou_type / f"evals_{i}.feather")
+
+        open(f"{scratch_it}/eval_done", "w").close()
+
+    # Massage the frames together from disk to combat OOM.
+    unified_df = None
+    glob_files = []
+    for ou in OperatingUnit:
+        ou_type = ou.name
+        glob_files.extend(glob.glob(f"{scratch_it}/evals/{ou_type}/evals_*.feather"))
+    assert len(glob_files) > 0
+
+    key_fn = lambda x: int(x.split(".feather")[0].split("_")[-1]) / eval_batch_size
+    glob_files = sorted(glob_files, key=key_fn)
+    df_files = []
+    for _, group in itertools.groupby(glob_files, key=key_fn):
+        def logged_read(input_file):
+            logger.info("[^]: [MASSAGE] Input %s", input_file)
+            keep_columns = ["query_id", "query_order", "pred_elapsed_us", "error_missing_model"]
+            df = pd.read_feather(input_file, columns=keep_columns)
+            return df
+
+        df = pd.concat(map(logged_read, group))
+        df.reset_index(drop=True).groupby(["query_id", "query_order"]).sum()
+        df_files.append(df)
+
+    combined_frame = pd.concat(df_files, ignore_index=True).groupby(by=["query_id", "query_order"]).sum()
+    unified_df = combined_frame.reset_index(drop=False)
+    del combined_frame
+    gc.collect()
+
+    assert unified_df is not None
+    unified_df.sort_values(by=["query_id", "query_order"], inplace=True, ignore_index=True)
+    unified_df.set_index(keys=["query_id", "query_order"], inplace=True)
+    assert unified_df.index.is_unique
+
+    queries.set_index(keys=["query_id", "query_order"], inplace=True)
+    queries = queries.join(unified_df, how="inner")
+    queries.reset_index(drop=False, inplace=True)
+    assert np.sum(queries.pred_elapsed_us.isna()) == 0
+    queries.to_feather(output_path / "query_results.feather")
+
+##################################################################################
+# Control
+##################################################################################
+
+def main(psycopg2_conn, session_sql, compute_frames, use_workload_table_estimates, eval_batch_size, dir_models, dir_workload_model, dir_data, dir_evals_output, dir_scratch):
     # Load the models
     base_models = load_models(dir_models)
     workload_model = WorkloadModel()
@@ -632,12 +1005,7 @@ def main(benchmark, psycopg2_conn, session_sql, dir_models, dir_workload_model, 
     scratch = dir_scratch / "eval_query_workload_scratch"
     scratch.mkdir(parents=True, exist_ok=True)
 
-    with open(f"{dir_data}/analysis/keyspaces.pickle", "rb") as f:
-        table_attr_map = pickle.load(f)
-        attr_table_map = pickle.load(f)
-        table_keyspace_map = pickle.load(f)
-        query_template_map = pickle.load(f)
-        window_index_map = pickle.load(f)
+    table_attr_map, _, _, _, _, _ = keyspace_metadata_read(f"{dir_data}/analysis")
 
     with psycopg.connect(psycopg2_conn, autocommit=True) as conn:
         conn.execute("SET qss_capture_enabled = OFF")
@@ -646,66 +1014,34 @@ def main(benchmark, psycopg2_conn, session_sql, dir_models, dir_workload_model, 
                 for line in f:
                     conn.execute(line)
 
-        # Get metadata.
-        metadata = prepare_pg_inference_state(conn)
+        # Load all the relevant data.
+        tables = table_attr_map.keys()
+        ff_tbl_change_map = compute_ff_changes(dir_data, tables)
+        table_oid_map = compute_table_oids(conn)
+        index_table_map = compute_index_table_map(conn)
+        index_keyspace_map = compute_index_keyspace_map(conn)
+        trigger_map = compute_trigger_map(conn)
 
-        idxoid_table_map = {}
-        result = conn.execute("""
-            SELECT indexrelid,
-                   t.relname
-              FROM pg_index,
-                   pg_class t
-             WHERE pg_index.indrelid = t.oid
-        """)
-        for tup in result:
-            idxoid_table_map[tup[0]] = tup[1]
+        # Generate query operating units.
+        generate_query_ous(conn, compute_frames, use_workload_table_estimates, dir_data, tables, workload_model, ff_tbl_change_map, index_table_map, index_keyspace_map, table_oid_map, trigger_map, scratch)
 
-        ddl = pd.read_csv(f"{dir_data}/pg_qss_ddl.csv")
-        ddl = ddl[ddl.command == "AlterTableOptions"]
-        ff_tbl_change_map = {t: [] for t in TABLES}
-        for tbl in TABLES:
-            query_str = ddl["query"].str
-            slots = query_str.contains(tbl) & query_str.contains("fillfactor")
-            tbl_changes = ddl[slots]
-            for q in tbl_changes.itertuples():
-                root = pglast.Node(pglast.parse_sql(q.query))
-                for node in root.traverse():
-                    if isinstance(node, pglast.node.Node):
-                        if isinstance(node.ast_node, pglast.ast.DefElem):
-                            if node.ast_node.defname == "fillfactor":
-                                ff = node.ast_node.arg.val
-                                ff_tbl_change_map[tbl].append((q.statement_timestamp, ff))
+        # Attach metadata to query OUs.
+        attach_metadata_ous(conn, scratch)
 
-        window_stats = slice_windows(conn, dir_data, slice_window, TABLES, ff_tbl_change_map, metadata["pg_class"], table_attr_map, table_keyspace_map, scratch, workload_model)
-        generate_query_ous(conn, scratch, window_stats, idxoid_table_map, metadata["pg_class_lookup"], metadata)
-        augment_ous(scratch / "ous", [metadata], conn)
-
-        key_fn = lambda x: int(x.split(".feather")[0].split("_")[-1])
-        chunk_files = sorted(glob.glob(f"{scratch}/chunks/chunk_*"), key=key_fn)
+        # Read the full list of queries from the disk.
         def read(f):
-            df = pd.read_feather(f, columns=["query_id", "query_order", "query_text", "modify_target", "OP", "elapsed_us"])
-            empty_target = df[df.modify_target.isnull()]
-            for tbl in TABLES:
-                mask = empty_target.query_text.str.contains(tbl)
-                df.loc[empty_target[mask].index, "modify_target"] = tbl
-            return df
-        df = pd.concat(map(read, chunk_files), ignore_index=True, axis=0)
+            return pd.read_feather(f, columns=["query_id", "query_order", "query_text", "txn", "target", "OP", "statement_timestamp", "elapsed_us"])
+        queries = pd.concat(map(read, glob.glob(f"{dir_data}/snippets/chunk_*/chunk.feather")))
+        queries.sort_values(by=["query_order"], ignore_index=True)
 
-        eval_timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        base_output = dir_evals_output / f"eval_{eval_timestamp}"
+        base_output = dir_evals_output
         base_output.mkdir(parents=True, exist_ok=True)
-        evaluate_query_plans(eval_batch_size, base_models, scratch / "ous", df, base_output)
+        evaluate_query_plans(base_models, queries, scratch, base_output, eval_batch_size)
         with open(f"{base_output}/ddl_changes.pickle", "wb") as f:
             pickle.dump(ff_tbl_change_map, f)
 
 
 class EvalQueryWorkloadCLI(cli.Application):
-    benchmark = cli.SwitchAttr(
-        "--benchmark",
-        str,
-        mandatory=True,
-        help="Benchmark that is being evaluated.",
-    )
     session_sql = cli.SwitchAttr(
         "--session-sql",
         Path,
@@ -748,31 +1084,35 @@ class EvalQueryWorkloadCLI(cli.Application):
         mandatory=True,
         help="Psycopg2 connection string for connecting to a valid database.",
     )
-    slice_window = cli.SwitchAttr(
-        "--slice-window",
-        int,
-        mandatory=True,
-        help="Size of the window slice that should be used.",
+    compute_frames = cli.Flag(
+        "--compute-frames",
+        default=False,
+        help="Whether we need to compute frames or can load from path.",
     )
     eval_batch_size = cli.SwitchAttr(
         "--eval-batch-size",
         int,
-        default=4,
-        help="Number of OU files to evaluate in a batch.",
+        default=6,
+        help="Evaluation batch size to use.",
+    )
+    use_workload_table_estimate = cli.Flag(
+        "--use-workload-table-estimate",
+        default=False,
+        help="Whether to use workload model for table stats estimates.",
     )
 
 
     def main(self):
-        main(self.benchmark,
-             self.psycopg2_conn,
+        main(self.psycopg2_conn,
              self.session_sql,
+             self.compute_frames,
+             self.use_workload_table_estimate,
+             self.eval_batch_size,
              self.dir_models,
              self.dir_workload_model,
              self.dir_data,
-             self.slice_window,
              self.dir_evals_output,
-             self.dir_scratch,
-             self.eval_batch_size)
+             self.dir_scratch)
 
 
 if __name__ == "__main__":

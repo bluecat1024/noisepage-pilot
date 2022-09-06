@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 
+from datetime import datetime
 from doit.action import CmdAction
 from plumbum import local, FG
 
@@ -476,30 +477,41 @@ def task_behavior_eval_query_workload():
     """
     Behavior modeling: perform query-level model analysis using a workload model.
     """
-    def eval_cmd(benchmark, session_sql, eval_raw_data, base_models, workload_model, psycopg2_conn, slice_window):
+    def eval_cmd(session_sql, eval_raw_data, base_models, workload_model, psycopg2_conn, compute_frames, eval_batch_size, use_workload_table_estimate, scratch_space, output):
         if base_models is None:
             # Find the latest experiment by last modified timestamp.
             experiment_list = sorted((exp_path for exp_path in ARTIFACT_MODELS.glob("*")), key=os.path.getmtime)
             assert len(experiment_list) > 0, "No experiments found."
             base_models = experiment_list[-1] / "gbm_l2"
 
-        assert benchmark in BENCHDB_TO_TABLES, "Unknwon benchmark specified."
         assert eval_raw_data is not None, "No path to experiment data specified."
         assert os.path.isdir(base_models), f"Specified path {base_models} is not a valid directory."
         assert psycopg2_conn is not None, "No Psycopg2 connection string is specified."
 
+        if output is None:
+            eval_timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            output = ARTIFACT_EVALS_QUERY_WORKLOAD / f"eval_{eval_timestamp}"
+
         eval_args = (
-            f"--benchmark {benchmark} "
             f"--dir-data {eval_raw_data} "
             f"--dir-base-models {base_models} "
             f"--dir-workload-model {workload_model} "
-            f"--dir-evals-output {ARTIFACT_EVALS_QUERY_WORKLOAD} "
+            f"--dir-evals-output {output} "
             f"--psycopg2-conn \"{psycopg2_conn}\" "
-            f"--slice-window {slice_window} "
+            f"--eval-batch-size {eval_batch_size} "
         )
+
+        if use_workload_table_estimate is not None:
+            eval_args += f"--use-workload-table-estimate "
+
+        if compute_frames is not None:
+            eval_args += f"--compute-frames {compute_frames} "
 
         if session_sql is not None:
             eval_args = eval_args + f"--session-sql {session_sql} "
+
+        if scratch_space is not None:
+            eval_args += f"--dir-scratch {scratch_space} "
 
         return f"python3 -m behavior eval_query_workload {eval_args}"
 
@@ -509,12 +521,6 @@ def task_behavior_eval_query_workload():
         "verbosity": VERBOSITY_DEFAULT,
         "uptodate": [False],
         "params": [
-            {
-                "name": "benchmark",
-                "long": "benchmark",
-                "help": "Benchmark that is being evaluated.",
-                "default": None,
-            },
             {
                 "name": "session_sql",
                 "long": "session_sql",
@@ -546,9 +552,33 @@ def task_behavior_eval_query_workload():
                 "default": None,
             },
             {
-                "name": "slice_window",
-                "long": "slice_window",
-                "help": "Slice of the window that should be processed.",
+                "name": "compute_frames",
+                "long": "compute_frames",
+                "help": "Whether to compute frames on the fly.",
+                "default": None,
+            },
+            {
+                "name": "eval_batch_size",
+                "long": "eval_batch_size",
+                "help": "Size of OU files to batch evaluate.",
+                "default": 16,
+            },
+            {
+                "name": "use_workload_table_estimate",
+                "long": "use_workload_table_estimate",
+                "help": "Whether to use the workload model to estimate table statistics.",
+                "default": None,
+            },
+            {
+                "name": "scratch_space",
+                "long": "scratch_space",
+                "help": "Space to use for the temporary files.",
+                "default": None,
+            },
+            {
+                "name": "output",
+                "long": "output",
+                "help": "Path to the output directory that should be used.",
                 "default": None,
             },
         ],
@@ -557,12 +587,27 @@ def task_behavior_eval_query_workload():
 
 def task_behavior_eval_query_plots():
     """
-    Behavior modeling: generate plots from eval_query analysis.
+    Behavior modeling: generate plots from eval_query[_workload] analysis.
     """
-    def eval_cmd():
+    def eval_cmd(input_dir, txn_analysis_file, generate_summary, generate_holistic, generate_per_query, generate_predict_abs_errors):
         eval_args = (
-            f"--dir-input {ARTIFACT_EVALS_QUERY} "
+            f"--dir-input {input_dir} "
         )
+
+        vals = [
+            ("--generate-summary", generate_summary),
+            ("--generate-holistic", generate_holistic),
+            ("--generate-per-query", generate_per_query),
+            ("--generate-predict-abs-errors", generate_predict_abs_errors),
+        ]
+
+        for (k, v) in vals:
+            if v is not None:
+                eval_args += f"{k} "
+
+        if txn_analysis_file is not None:
+            assert Path(txn_analysis_file).exists()
+            eval_args += f"--txn-analysis-file {txn_analysis_file} "
 
         return f"python3 -m behavior eval_query_plots {eval_args}"
 
@@ -570,22 +615,42 @@ def task_behavior_eval_query_plots():
         "actions": [CmdAction(eval_cmd, buffering=1)],
         "verbosity": VERBOSITY_DEFAULT,
         "uptodate": [False],
-    }
-
-
-def task_behavior_eval_query_workload_plots():
-    """
-    Behavior modeling: generate plots from eval_query_workload analysis.
-    """
-    def eval_cmd():
-        eval_args = (
-            f"--dir-input {ARTIFACT_EVALS_QUERY_WORKLOAD} "
-        )
-
-        return f"python3 -m behavior eval_query_workload_plots {eval_args}"
-
-    return {
-        "actions": [CmdAction(eval_cmd, buffering=1)],
-        "verbosity": VERBOSITY_DEFAULT,
-        "uptodate": [False],
+        "params": [
+            {
+                "name": "input_dir",
+                "long": "input_dir",
+                "help": "Path to root folder containing the input data to plot.",
+                "default": None,
+            },
+            {
+                "name": "txn_analysis_file",
+                "long": "txn_analysis_file",
+                "help": "Path to transaction analysis file.",
+                "default": None,
+            },
+            {
+                "name": "generate_summary",
+                "long": "generate_summary",
+                "help": "Whether to generate summary error information.",
+                "default": None,
+            },
+            {
+                "name": "generate_holistic",
+                "long": "generate_holistic",
+                "help": "Whether to generate holistic KDE plots of the errors.",
+                "default": None,
+            },
+            {
+                "name": "generate_per_query",
+                "long": "generate_per_query",
+                "help": "Whether to generate per-query plots of the errors.",
+                "default": None,
+            },
+            {
+                "name": "generate_predict_abs_errors",
+                "long": "generate_predict_abs_errors",
+                "help": "Whether to generate abs errors against each table.",
+                "default": None,
+            },
+        ],
     }

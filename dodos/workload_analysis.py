@@ -24,14 +24,11 @@ def task_workload_analyze():
     """
     Workload Analysis: perform analysis of a workload
     """
-    def workload_analyze(benchmark, input_workload, output_workload, workload_only, psycopg2_conn):
-        assert input_workload is not None and output_workload is not None
-        assert len(benchmark.split(",")) == len(input_workload.split(",")) == len(output_workload.split(","))
+    def workload_analyze(benchmark, input_workload, workload_only, psycopg2_conn, slice_window):
+        assert input_workload is not None
+        assert len(benchmark.split(",")) == len(input_workload.split(","))
 
         for iw in input_workload.split(","):
-            assert Path(iw).exists(), f"{iw} is not valid path."
-
-        for iw in output_workload.split(","):
             assert Path(iw).exists(), f"{iw} is not valid path."
 
         for bw in benchmark.split(","):
@@ -40,8 +37,8 @@ def task_workload_analyze():
         eval_args = (
             f"--benchmark {benchmark} "
             f"--dir-workload-input {input_workload} "
-            f"--dir-workload-output {output_workload} "
             f"--workload-only {workload_only} "
+            f"--slice-window {slice_window} "
         )
 
         if psycopg2_conn is not None:
@@ -67,12 +64,6 @@ def task_workload_analyze():
                 "default": None,
             },
             {
-                "name": "output_workload",
-                "long": "output_workload",
-                "help": "Path to the output workload that should be analyzed.",
-                "default": None,
-            },
-            {
                 "name": "workload_only",
                 "long": "workload_only",
                 "help": "Whether the input workload is only the workload or not.",
@@ -84,6 +75,12 @@ def task_workload_analyze():
                 "help": "psycopg2 connection string to connect to the valid database instance.",
                 "default": None,
             },
+            {
+                "name": "slice_window",
+                "long": "slice_window",
+                "help": "Slice of the window that should be processed.",
+                "default": None,
+            },
         ],
     }
 
@@ -92,25 +89,20 @@ def task_workload_populate_data():
     """
     Workload Analysis: populate missing parameters of a workload and infer execution characteristics (if needed).
     """
-    def workload_populate_data(benchmark, input_workload, output_workload, workload_only, psycopg2_conn):
-        assert input_workload is not None and output_workload is not None
-        assert len(benchmark.split(",")) == len(input_workload.split(",")) == len(output_workload.split(","))
+    def workload_populate_data(input_workload, workload_only, psycopg2_conn, slice_window, skip_save_frames):
+        assert input_workload is not None
 
         for iw in input_workload.split(","):
             assert Path(iw).exists(), f"{iw} is not valid path."
 
-        for iw in output_workload.split(","):
-            assert Path(iw).exists(), f"{iw} is not valid path."
-
-        for bw in benchmark.split(","):
-            assert bw in BENCHDB_TO_TABLES
-
         eval_args = (
-            f"--benchmark {benchmark} "
             f"--dir-workload-input {input_workload} "
-            f"--dir-workload-output {output_workload} "
             f"--workload-only {workload_only} "
+            f"--slice-window {slice_window} "
         )
+
+        if skip_save_frames is not None:
+            eval_args += f"--skip-save-frames {skip_save_frames} "
 
         if psycopg2_conn is not None:
             eval_args = eval_args + f"--psycopg2-conn \"{psycopg2_conn}\" "
@@ -123,21 +115,9 @@ def task_workload_populate_data():
         "verbosity": VERBOSITY_DEFAULT,
         "params": [
             {
-                "name": "benchmark",
-                "long": "benchmark",
-                "help": "Benchmark that is being analyzed.",
-                "default": None,
-            },
-            {
                 "name": "input_workload",
                 "long": "input_workload",
                 "help": "Path to the input workload that should be analyzed.",
-                "default": None,
-            },
-            {
-                "name": "output_workload",
-                "long": "output_workload",
-                "help": "Path to the output workload that should be analyzed.",
                 "default": None,
             },
             {
@@ -152,6 +132,18 @@ def task_workload_populate_data():
                 "help": "psycopg2 connection string to connect to the valid database instance.",
                 "default": None,
             },
+            {
+                "name": "slice_window",
+                "long": "slice_window",
+                "help": "Slice of the window that should be processed.",
+                "default": None,
+            },
+            {
+                "name": "skip_save_frames",
+                "long": "skip_save_frames",
+                "help": "Whether to save intermediate data frames or not.",
+                "default": None,
+            },
         ],
     }
 
@@ -160,23 +152,14 @@ def task_workload_windowize():
     """
     Workload Analysis: construct workload windows based on sampling.
     """
-    def windowize(benchmark, input_workload, output_workload):
-        assert input_workload is not None and output_workload is not None
-        assert len(benchmark.split(",")) == len(input_workload.split(",")) == len(output_workload.split(","))
+    def windowize(input_workload):
+        assert input_workload is not None
 
         for iw in input_workload.split(","):
             assert Path(iw).exists(), f"{iw} is not valid path."
 
-        for iw in output_workload.split(","):
-            assert Path(iw).exists(), f"{iw} is not valid path."
-
-        for bw in benchmark.split(","):
-            assert bw in BENCHDB_TO_TABLES
-
         eval_args = (
-            f"--benchmark {benchmark} "
             f"--dir-workload-input {input_workload} "
-            f"--dir-workload-output {output_workload} "
         )
 
         return f"python3 -m behavior workload_windowize {eval_args}"
@@ -187,21 +170,9 @@ def task_workload_windowize():
         "verbosity": VERBOSITY_DEFAULT,
         "params": [
             {
-                "name": "benchmark",
-                "long": "benchmark",
-                "help": "Benchmark that is being analyzed.",
-                "default": None,
-            },
-            {
                 "name": "input_workload",
                 "long": "input_workload",
                 "help": "Path to the input workload that should be analyzed.",
-                "default": None,
-            },
-            {
-                "name": "output_workload",
-                "long": "output_workload",
-                "help": "Path to the output workload that should be analyzed.",
                 "default": None,
             },
         ],
@@ -212,23 +183,14 @@ def task_workload_prepare_train():
     """
     Workload Analysis: construct training data from windows.
     """
-    def prepare_train(benchmark, input_workload, output_workload):
-        assert input_workload is not None and output_workload is not None
-        assert len(benchmark.split(",")) == len(input_workload.split(",")) == len(output_workload.split(","))
+    def prepare_train(input_workload):
+        assert input_workload is not None
 
         for iw in input_workload.split(","):
             assert Path(iw).exists(), f"{iw} is not valid path."
 
-        for iw in output_workload.split(","):
-            assert Path(iw).exists(), f"{iw} is not valid path."
-
-        for bw in benchmark.split(","):
-            assert bw in BENCHDB_TO_TABLES
-
         eval_args = (
-            f"--benchmark {benchmark} "
             f"--dir-workload-input {input_workload} "
-            f"--dir-workload-output {output_workload} "
         )
 
         return f"python3 -m behavior workload_prepare_train {eval_args}"
@@ -239,21 +201,9 @@ def task_workload_prepare_train():
         "verbosity": VERBOSITY_DEFAULT,
         "params": [
             {
-                "name": "benchmark",
-                "long": "benchmark",
-                "help": "Benchmark that is being analyzed.",
-                "default": None,
-            },
-            {
                 "name": "input_workload",
                 "long": "input_workload",
                 "help": "Path to the input workload that should be analyzed.",
-                "default": None,
-            },
-            {
-                "name": "output_workload",
-                "long": "output_workload",
-                "help": "Path to the output workload that should be analyzed.",
                 "default": None,
             },
         ],
@@ -265,7 +215,7 @@ def task_workload_train():
     Workload Analysis: train workload models.
     """
 
-    def train_cmd(input_data, output_dir, separate, val_size, epochs, batch_size, hidden_size):
+    def train_cmd(input_data, output_dir, separate, val_size, lr, epochs, batch_size, hidden_size, cuda):
         if not Path(output_dir).is_absolute():
             # Make it a relative path to ARTIFACT_MODELS.
             output_dir = ARTIFACT_MODELS / output_dir
@@ -279,6 +229,9 @@ def task_workload_train():
             f"--batch-size {batch_size} "
             f"--hidden-size {hidden_size} "
         )
+
+        if cuda is not None:
+            train_args += f"--cuda "
 
         return f"python3 -m behavior workload_train {train_args}"
 
@@ -314,6 +267,13 @@ def task_workload_train():
                 "default": 0.2,
             },
             {
+                "name": "lr",
+                "long": "lr",
+                "help": "Learning rate for Adam optimizer.",
+                "type": float,
+                "default": 0.001,
+            },
+            {
                 "name": "epochs",
                 "long": "epochs",
                 "help": "Number of epochs to train the model.",
@@ -334,47 +294,11 @@ def task_workload_train():
                 "type": int,
                 "default": 256,
             },
-        ],
-    }
-
-
-def task_workload_eval():
-    """
-    Workload Analysis: evaluate workload models.
-    """
-
-    def eval_cmd(input_data, model_input_dir, batch_size):
-        eval_args = (
-            f"--dir-input \"{input_data}\" "
-            f"--model-input {model_input_dir} "
-            f"--batch-size {batch_size} "
-        )
-
-        return f"python3 -m behavior workload_eval {eval_args}"
-
-    return {
-        "actions": [f"mkdir -p {ARTIFACT_MODELS}", CmdAction(eval_cmd, buffering=1)],
-        "verbosity": VERBOSITY_DEFAULT,
-        "uptodate": [False],
-        "params": [
             {
-                "name": "input_data",
-                "long": "input_data",
-                "help": "Path to all the input data that should be used, comma separated if multiple globs.",
+                "name": "cuda",
+                "long": "cuda",
+                "help": "Whether to use CUDA or not.",
                 "default": None,
-            },
-            {
-                "name": "model_input_dir",
-                "long": "model_input_dir",
-                "help": "Path to the input folder containing the model.",
-                "default": None,
-            },
-            {
-                "name": "batch_size",
-                "long": "batch_size",
-                "help": "Batch size that should be used.",
-                "type": int,
-                "default": 1024,
             },
         ],
     }

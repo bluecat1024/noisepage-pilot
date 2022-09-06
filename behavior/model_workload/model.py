@@ -22,8 +22,14 @@ HISTOGRAM_POSITIONS = np.arange(0, 1.0 + 1.0 / (HISTOGRAM_LENGTH - 1), 1.0 / (HI
 
 EMPTY_HIST_VALUE_FILL = -1.0
 UNIQUE_HIST_VALUE_FILL = 1.0
+NORM_RELATIVE_OPS = 100
 
 MODEL_WORKLOAD_TARGETS = [
+    "norm_delta_free_percent",
+    "norm_delta_dead_percent",
+    "norm_delta_table_len",
+    "norm_delta_tuple_count",
+
     "extend_percent",
     "defrag_percent",
     "hot_percent",
@@ -32,6 +38,7 @@ MODEL_WORKLOAD_TARGETS = [
 MODEL_WORKLOAD_NORMAL_INPUTS = [
     "free_percent",
     "dead_tuple_percent",
+    "num_pages",
     "tuple_count",
     "tuple_len_avg",
     "target_ff",
@@ -63,9 +70,12 @@ class WorkloadModelInternal(nn.Module):
         for (k, nn1, nn2) in MODEL_WORKLOAD_HIST_INPUTS:
             self[nn1] = nn.Linear(HISTOGRAM_LENGTH, hid_units)
             self[nn2] = nn.Linear(hid_units, hid_units)
+            self[nn1 + "dropout"] = nn.AlphaDropout(p=0.2)
+            self[nn2 + "dropout"] = nn.AlphaDropout(p=0.2)
 
         self.out_mlp1 = nn.Linear(hid_units * len(MODEL_WORKLOAD_HIST_INPUTS) + len(MODEL_WORKLOAD_NORMAL_INPUTS), hid_units)
         self.out_mlp2 = nn.Linear(hid_units, num_outputs)
+        self.out_dropout = nn.AlphaDropout(p=0.2)
         self.hid_units = hid_units
         self.num_outputs = num_outputs
 
@@ -82,11 +92,13 @@ class WorkloadModelInternal(nn.Module):
         for (key, nn1, nn2) in MODEL_WORKLOAD_HIST_INPUTS:
             s0 = self[nn1]
             s1 = self[nn2]
+            d0 = self[nn1 + "dropout"]
+            d1 = self[nn2 + "dropout"]
             data = locals()[f"{key}_dist"]
             mask = locals()[f"{key}_dist_mask"]
 
-            output = F.relu(s0(data))
-            output = F.relu(s1(output))
+            output = d0(F.leaky_relu(s0(data)))
+            output = d1(F.leaky_relu(s1(output)))
             output = output * mask
             output = torch.sum(output, dim=1, keepdim=False)
             norm = mask.sum(1, keepdim=False)
@@ -95,7 +107,7 @@ class WorkloadModelInternal(nn.Module):
 
         outputs.append(nonhist_inputs)
         cat = torch.cat(tuple(o for o in outputs), 1)
-        cat = F.relu(self.out_mlp1(cat))
+        cat = self.out_dropout(F.leaky_relu(self.out_mlp1(cat)))
         out = self.out_mlp2(cat)
         return out
 
@@ -107,6 +119,10 @@ class WorkloadModel:
         else:
             for i, model in enumerate(self.models):
                 torch.save(model.state_dict(), Path(output_dir) / f"model_target_{i}.pt")
+
+    def save_partial(self, output_dir, end):
+        for i, model in enumerate(self.models[:end + 1]):
+            torch.save(model.state_dict(), Path(output_dir) / f"model_target_{i}.pt")
 
     def load(self, output_dir):
         if (Path(output_dir) / "combined_model.pt").exists():
@@ -145,18 +161,18 @@ class WorkloadModel:
     def get_next_model(self):
         if self.model is not None:
             if self.next != 0:
-                return None, None
+                return None, None, None
 
             self.next = 1
-            return self.model, None
+            return self.model, None, "combined_model.pt"
         else:
             if self.next >= len(self.models):
-                return None, None
+                return None, None, None
 
             target = self.models[self.next]
             target_val = self.next
             self.next = self.next + 1
-            return target, target_val
+            return target, target_val, f"model_target_{target_val}"
 
     @torch.no_grad()
     def predict(self, *args):
@@ -226,17 +242,17 @@ class WorkloadModel:
                                          *[output_tensors[k] for k in output_tensors.keys() if k.endswith("_dist")],
                                          *[output_tensors[k] for k in output_tensors.keys() if k.endswith("_dist_mask")])
 
-    def featurize(queries, data, table_data, keyspace, train=True):
+    def featurize(queries, data, table_data, keyspace, train=True, next_table_tuple=None):
         num_insert = queries[queries.OP == "INSERT"].num_modify.sum()
         num_update = queries[queries.OP == "UPDATE"].num_modify.sum()
         num_delete = queries[queries.OP == "DELETE"].num_modify.sum()
+        num_modify = num_insert + num_update + num_delete
+
         num_select_tuples = queries[queries.OP == "SELECT"].num_modify.sum()
-        num_modify = num_insert + num_update + num_delete + num_select_tuples
+        num_touch = num_modify + num_select_tuples
 
         if train:
-            # num_modify on SELECT is basically the number of tuples.
-            # The defrag percent is computed with respect to the number of tuples.
-            num_defrag = queries[queries.OP == "SELECT"].num_defrag.sum()
+            num_defrag = queries.num_defrag.sum()
             num_extend = queries.num_extend.sum()
             num_hot = queries.num_hot.sum()
             assert num_update >= num_hot
@@ -289,32 +305,63 @@ class WorkloadModel:
             d = {
                 "free_percent": table_data["approx_free_percent"],
                 "dead_tuple_percent": table_data["dead_tuple_percent"],
+                "num_pages": table_data["table_len"] / 8192,
                 "tuple_count": table_data["approx_tuple_count"],
                 "tuple_len_avg": table_data["tuple_len_avg"],
                 "target_ff": table_data["ff"],
             }
+
+            assert table_data["approx_free_percent"] >= 0.0 and table_data["approx_free_percent"] <= 1.0
+            assert table_data["dead_tuple_percent"] >= 0.0 and table_data["dead_tuple_percent"] <= 1.0
         else:
             d = {
-                "free_percent": table_data.approx_free_percent,
-                "dead_tuple_percent": table_data.dead_tuple_percent,
+                "free_percent": table_data.approx_free_percent / 100.0,
+                "dead_tuple_percent": table_data.dead_tuple_percent / 100.0,
+                "num_pages": table_data.table_len / 8192,
                 "tuple_count": table_data.approx_tuple_count,
                 "tuple_len_avg": table_data.approx_tuple_len / table_data.approx_tuple_count,
                 "target_ff": table_data.ff,
             }
 
-        d["select_dist"] = 0.0 if num_modify == 0 else (num_select_tuples / num_modify)
-        d["insert_dist"] = 0.0 if num_modify == 0 else (num_insert / num_modify)
-        d["update_dist"] = 0.0 if num_modify == 0 else (num_update / num_modify)
-        d["delete_dist"] = 0.0 if num_modify == 0 else (num_delete / num_modify)
+        # This distribution is computed with respect to the number of tuples tampered with!
+        # and not the # of queries. This is because the targets are generally per-tuple
+        # targets and not per-query targets.
+        d["select_dist"] = 0.0 if num_touch == 0 else (num_select_tuples / num_touch)
+        d["insert_dist"] = 0.0 if num_touch == 0 else (num_insert / num_touch)
+        d["update_dist"] = 0.0 if num_touch == 0 else (num_update / num_touch)
+        d["delete_dist"] = 0.0 if num_touch == 0 else (num_delete / num_touch)
 
         # Populate all the keys.
         for (k, _, _) in MODEL_WORKLOAD_HIST_INPUTS:
             d[k] = dists[k]
 
         if train:
-            # Add the targets.
             d["extend_percent"] = 0.0 if (num_insert + num_update - num_hot) == 0 else num_extend / (num_insert + num_update - num_hot)
-            d["defrag_percent"] = 0.0 if num_select_tuples == 0 else num_defrag / num_select_tuples
+            # The defrag percent is computed with respect to the number of tuples touched by SELECT/UPDATE/DELETE components.
+            d["defrag_percent"] = 0.0 if (num_select_tuples + num_update + num_delete) == 0 else num_defrag / (num_select_tuples + num_update + num_delete)
             d["hot_percent"] = 0.0 if num_update == 0 else num_hot / num_update
+
+            delta_free = next_table_tuple.approx_free_percent - table_data.approx_free_percent
+            delta_dead = next_table_tuple.dead_tuple_percent - table_data.dead_tuple_percent
+
+            # Try to normalize them against a fixed relative value. We probably have to do this becuase these values
+            # are fundamentally deendent on the absolute number. We assume that steady state nature holds.
+            if num_modify == 0:
+                d["norm_delta_free_percent"] = 0.0
+                d["norm_delta_dead_percent"] = 0.0
+                d["norm_delta_table_len"] = 0.0
+                d["norm_delta_tuple_count"] = 0.0
+            else:
+                # If there are 2X NORM_RELATIVE_OPS, we want to divide delta_free by 2.
+                # If there is 1/2X, we want to multiply delta_free by 2.
+                d["norm_delta_free_percent"] = delta_free * (NORM_RELATIVE_OPS / num_modify)
+                d["norm_delta_dead_percent"] = delta_dead * (NORM_RELATIVE_OPS / num_modify)
+                d["norm_delta_table_len"] = 0.0
+                d["norm_delta_tuple_count"] = 0.0
+
+                if num_insert + num_update != 0:
+                    d["norm_delta_table_len"] = (next_table_tuple.table_len - table_data.table_len) * (NORM_RELATIVE_OPS / (num_insert + num_update))
+                if num_insert + num_delete != 0:
+                    d["norm_delta_tuple_count"] = (next_table_tuple.approx_tuple_count - table_data.approx_tuple_count) * (NORM_RELATIVE_OPS / (num_insert + num_delete))
 
         return d

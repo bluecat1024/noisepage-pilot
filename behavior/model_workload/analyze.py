@@ -1,5 +1,5 @@
+import math
 import glob
-import pickle
 import pglast
 import psycopg
 from tqdm import tqdm
@@ -12,6 +12,7 @@ import json
 import logging
 
 from behavior import BENCHDB_TO_TABLES
+from behavior.model_workload.utils import keyspace_metadata_output
 
 # Queries to block.
 QUERY_CONTENT_BLOCK = [
@@ -22,8 +23,7 @@ QUERY_CONTENT_BLOCK = [
 ]
 
 PER_QUERY_INDEX = ["query_id", "db_id", "pid", "statement_timestamp"]
-AUX_COLUMNS = ["plan_node_id", "elapsed_us", "payload", "comment", "txn", "target", "num_rel_refs", "query_text", "generation", "id"]
-TABLES = []
+AUX_COLUMNS = ["plan_node_id", "elapsed_us", "payload", "comment", "txn", "target", "num_rel_refs", "query_text", "generation"]
 
 QUERY_TABLE_ATTRIBUTE_COLUMNS = """
 select
@@ -93,7 +93,9 @@ def handle_inserts(process, roots):
 
 def handle_idxscans(process, roots, indexoid_table_map):
     # Handle the case of IndexScan to get defrags.
-    # FIXME(wz2): Assume that only IndexScans can trigger a prune/defrag operation.
+    # FIXME(PRUNE): Assume that only IndexScans can trigger a prune/defrag operation
+    # The issue is also that PRUNE/DEFRAG does not differentiate between an INDEX prune or a base relation prune.
+    # The only insight is that whenever a page gets fetched, it can be pruned/defragged.
     idx_scans = process[(process.comment == "IndexScan") | (process.comment == "IndexOnlyScan")]
     idx_scans = idx_scans.reset_index(drop=True)
     idx_scans["target_scan"] = idx_scans.payload.apply(lambda x: indexoid_table_map[x] if x in indexoid_table_map else None)
@@ -165,19 +167,48 @@ def handle_updates(process, roots):
     return roots
 
 
-def analyze(input_dir, output_dir, workload_only, pg_qss_plans, query_template_map, indexoid_table_map):
+def handle_index_inserts(process, roots, indexoid_name_map):
+    # Handle the case of ModifyTableIndexInsert.
+    idx_inserts = process[process.comment == 'ModifyTableIndexInsert']
+    idx_inserts = idx_inserts.reset_index(drop=True)
+    idx_inserts.set_index(PER_QUERY_INDEX, inplace=True)
+
+    idx_inserts["index_num_extend"] = idx_inserts.counter1
+    idx_inserts["index_num_split"] = idx_inserts.counter2
+    idx_inserts["target_index_name_ins"] = idx_inserts.payload.apply(lambda x: indexoid_name_map[x] if x in indexoid_name_map else None)
+    idx_inserts.drop(columns=[f"counter{i}" for i in range(0, 10)] + AUX_COLUMNS, inplace=True)
+    idx_inserts = roots.join(idx_inserts, how="inner")
+
+    idx_inserts["target_index_name"] = idx_inserts.target_index_name_ins
+    idx_inserts.drop(columns=["target_index_name_ins"], inplace=True)
+
+    idx_inserts.reset_index(drop=False, inplace=True)
+    roots.reset_index(drop=False, inplace=True)
+    roots["target_index_name"] = None
+    roots = pd.concat([idx_inserts, roots], ignore_index=True)
+    roots.set_index(PER_QUERY_INDEX, inplace=True)
+
+    roots.fillna(value={"index_num_extend": 0, "index_num_split": 0}, inplace=True)
+    del idx_inserts
+    return roots
+
+
+def analyze(input_dir, slice_window, workload_only, tables, pg_qss_plans, query_template_map, all_columns, indexoid_name_map, indexoid_table_map):
     # Read in the stats and split into table and slices.
     max_txn = None
     max_time = None
 
+    num_lines = sum(1 for row in open(f"{input_dir}/pg_qss_stats.csv", 'r'))
+    chunk_size = slice_window * 32 # Batch a number of chunks into the same file.
+    num_chunks = math.ceil(num_lines * 1.0 / chunk_size)
+
     deferred = None
-    CHUNK_SIZE = 8192 * 32 if workload_only else 8192 * 128
     query_id_index = ["query_id", "db_id", "pid"]
 
     chunk_num = 0
-    it = pd.read_csv(f"{input_dir}/pg_qss_stats.csv", chunksize=CHUNK_SIZE, iterator=True)
-
-    with tqdm() as pbar:
+    query_order = 0
+    it = pd.read_csv(f"{input_dir}/pg_qss_stats.csv", chunksize=chunk_size, iterator=True)
+    with tqdm(total=num_chunks) as pbar:
         chunk = it.get_chunk()
         next_chunk = it.get_chunk()
         while chunk is not None:
@@ -212,22 +243,12 @@ def analyze(input_dir, output_dir, workload_only, pg_qss_plans, query_template_m
             process.drop(process[process.query_text.isna()].index, inplace=True)
 
             process["num_rel_refs"] = 0
-            for tbl in TABLES:
-                # Count the number of relations used in the query.
-                # FIXME(MODIFY): Assume that we all modification queries impact only 1 table.
-                tbl_vec = process.query_text.str.contains(tbl)
-                process.loc[tbl_vec, "target"] = tbl
-                process.loc[tbl_vec, "num_rel_refs"] = process.loc[tbl_vec, "num_rel_refs"] + 1
-
             roots = process[process.plan_node_id == -1].copy()
             if workload_only:
-                for tbl in TABLES:
-                    # This will be populated later with the "estimated" match count in the PK keyspace.
-                    # FIXME(INDEX): We should probably separate these based on keyspace.
-                    roots[f"{tbl}_pk_output"] = np.nan
-                roots.drop(columns=["id", "generation"], inplace=True)
+                roots["target_index_name"] = None
+                roots.drop(columns=["generation"], inplace=True)
             else:
-                roots.drop(columns=["id", "generation", "target"], inplace=True)
+                roots.drop(columns=["generation", "target"], inplace=True)
 
             roots.set_index(PER_QUERY_INDEX, inplace=True)
             roots.drop(columns=[f"counter{i}" for i in range(0, 10)] + ["plan_node_id", "payload"], inplace=True)
@@ -237,17 +258,18 @@ def analyze(input_dir, output_dir, workload_only, pg_qss_plans, query_template_m
             # we can model the ABORT by inserting the "inverse" modification queries. Punt for now.
             #
             # handle_abort()
-            roots.drop(columns=["txn"], inplace=True)
 
             if not workload_only:
+                roots.drop(columns=["txn"], inplace=True)
+
                 roots = handle_inserts(process, roots)
                 roots = handle_idxscans(process, roots, indexoid_table_map)
                 roots = handle_deletes(process, roots)
                 roots = handle_updates(process, roots)
 
-            # FIXME(INDEX): We theoretically also should process index splits/extends here, however, we observe that INDEX updates are
-            # not the most important. This is because under high HOT workloads -> the differential between HOT and not is reasonably
-            # significant. Eventually we should have some model for % extend and % split.
+                # Insert all the ModifyTableIndexInsert entries into roots. ModifyTableIndexInsert entries can
+                # be identified by target_index_name not being None.
+                roots = handle_index_inserts(process, roots, indexoid_name_map)
 
             # Now featurize the "OP".
             select_vec = roots.query_text.str.contains("select")
@@ -259,13 +281,11 @@ def analyze(input_dir, output_dir, workload_only, pg_qss_plans, query_template_m
             roots.loc[update_vec, "OP"] = "UPDATE"
             roots.loc[delete_vec, "OP"] = "DELETE"
 
-            # Set the modify_target by whether the query is an insert/update/delete.
-            insupdel = insert_vec | update_vec | delete_vec
-            roots["modify_target"] = None
-            roots.loc[insupdel, "modify_target"] = roots.loc[insupdel, "target"]
-            if workload_only:
-                # Drop target if we only have the workload.
-                roots.drop(columns=["target"], inplace=True)
+            # Set the is_insert and the is_delete flag.
+            roots["is_insert"] = False
+            roots["is_delete"] = False
+            roots.loc[insert_vec, "is_insert"] = True
+            roots.loc[delete_vec, "is_delete"] = True
 
             # Extract a unix_timestamp field.
             roots.reset_index(drop=False, inplace=True)
@@ -300,7 +320,15 @@ def analyze(input_dir, output_dir, workload_only, pg_qss_plans, query_template_m
             roots.sort_values(by=["statement_timestamp"], inplace=True, ignore_index=True)
             roots.drop(columns=["comment"], inplace=True)
 
-            roots.reset_index(drop=True).to_feather(f"{output_dir}/analysis/chunk_{chunk_num}.feather")
+            # Indicate that the attribute for everything not in the query text is None.
+            for col in [c for c in all_columns if c not in roots]:
+                roots[col] = None
+
+            # Set a query_order that will be used for everything going forwards.
+            roots["query_order"] = roots.index + query_order
+
+            roots.reset_index(drop=True).to_feather(f"{input_dir}/analysis/chunk_{chunk_num}.feather")
+            query_order = query_order + roots.shape[0]
             chunk_num += 1
 
             chunk = next_chunk
@@ -311,9 +339,8 @@ def analyze(input_dir, output_dir, workload_only, pg_qss_plans, query_template_m
             pbar.update()
 
 
-def analyze_workload(benchmark, input_dir, output_dir, workload_only, psycopg2_conn):
-    global TABLES
-    TABLES = BENCHDB_TO_TABLES[benchmark]
+def analyze_workload(benchmark, input_dir, slice_window, workload_only, psycopg2_conn):
+    tables = BENCHDB_TO_TABLES[benchmark]
 
     # If we only have the workload, then we don't have VACUUM and window timestamps.
     window_index_map = {}
@@ -321,7 +348,7 @@ def analyze_workload(benchmark, input_dir, output_dir, workload_only, psycopg2_c
         pg_stat_user_tables = pd.read_csv(f"{input_dir}/pg_stat_user_tables.csv")
         pg_stat_user_tables = pg_stat_user_tables[~pg_stat_user_tables.last_autovacuum.isnull()]
         pg_stat_user_tables["autovacuum_unix_timestamp"] = pd.to_datetime(pg_stat_user_tables.last_autovacuum).map(pd.Timestamp.timestamp)
-        for tbl in TABLES:
+        for tbl in tables:
             sample = pd.read_csv(f"{input_dir}/{tbl}.csv")
             sample["true_window_index"] = sample.index
             sample["time"] = (sample.time / float(1e6))
@@ -342,18 +369,21 @@ def analyze_workload(benchmark, input_dir, output_dir, workload_only, psycopg2_c
 
     # Here we construct all INDEX columns that are possibly of value.
     # This is done by extracting all INDEXed key columns and then augmenting on IDX-JOINs.
-    table_index_map = {t: set() for t in TABLES}
+    table_index_map = {t: set() for t in tables}
     # table_attr_map defines all attributes that might exist per table.
     # We hereby assume that attribute names are unique.
-    table_attr_map = {t: [] for t in TABLES}
+    table_attr_map = {t: [] for t in tables}
     attr_table_map = {}
     # Defines the keyspace for a relation. This is taken as the INDEX space OR the PK space.
     # All tuple inserts/deletes are done relative to the PK space. INDEX space is used
     # for looking at data distribution w.r.t to index clustering.
-    table_keyspace_map = {t: {} for t in TABLES}
+    table_keyspace_map = {t: {} for t in tables}
     # Process pg_index and pg_class from files to build the indexoid_table_map.
     indexoid_table_map = {}
+    indexoid_name_map = {}
 
+    # FIXME(NON_SCHEMA): We assume that there aren't useful schema changes to be identified
+    # by assuming that sample at t=0 for the schema is the same at any point in the data file.
     if workload_only:
         assert psycopg2_conn is not None
         with psycopg.connect(psycopg2_conn, autocommit=True) as connection:
@@ -367,18 +397,17 @@ def analyze_workload(benchmark, input_dir, output_dir, workload_only, psycopg2_c
                 for tup in result:
                     if tup[0] in table_index_map:
                         table_index_map[tup[0]] = table_index_map[tup[0]].union(tup[4].split(","))
-
                         table_keyspace_map[tup[0]][tup[1]] = tup[4].split(",")
+
+                        # tup[3] is whether the index is a primary key.
                         if tup[3]:
                             table_keyspace_map[tup[0]][tup[0]] = tup[4].split(",")
 
-        for tbl in TABLES:
+        for tbl in tables:
             for attr in table_attr_map[tbl]:
                 assert attr not in attr_table_map
                 attr_table_map[attr] = tbl
     else:
-        # FIXME(NON_SCHEMA): We assume that there aren't useful schema changes to be identified
-        # by assuming that sample at t=0 for the schema is the same at any point in the data file.
         pg_index = pd.read_csv(f"{input_dir}/pg_index.csv")
         pg_index = pg_index[pg_index.time == pg_index.iloc[-1].time]
 
@@ -409,7 +438,7 @@ def analyze_workload(benchmark, input_dir, output_dir, workload_only, psycopg2_c
             if pgatt[0] in table_attr_map:
                 table_attr_map[pgatt[0]] = pgatt[1][pgatt[1].attnum >= 1].attname.values
 
-        for tbl in TABLES:
+        for tbl in tables:
             for attr in table_attr_map[tbl]:
                 assert attr not in attr_table_map
                 attr_table_map[attr] = tbl
@@ -417,6 +446,7 @@ def analyze_workload(benchmark, input_dir, output_dir, workload_only, psycopg2_c
         for tup in pg_index.itertuples():
             # Construct the indexoid_table_map.
             indexoid_table_map[tup.indexrelid] = tup.relname
+            indexoid_name_map[tup.indexrelid] = tup.relname_index
 
             attnums = tup.indkey.split(" ")
             table_keyspace_map[tup.relname][tup.relname_index] = []
@@ -435,16 +465,49 @@ def analyze_workload(benchmark, input_dir, output_dir, workload_only, psycopg2_c
 
     # Process all the plans to get the query text.
     pg_qss_plans = pd.read_csv(f"{input_dir}/pg_qss_plans.csv")
-    pg_qss_plans["id"] = pg_qss_plans.index
     pg_qss_plans["query_text"] = ""
+    pg_qss_plans["target"] = ""
+    pg_qss_plans["num_rel_refs"] = 0
     for plan in pg_qss_plans.itertuples():
         feature = json.loads(plan.features)
         query_text = feature[0]["query_text"].lower().rstrip()
+
+        target = ""
+        num_rel_refs = 0
+        if query_text is not None:
+            root = pglast.Node(pglast.parse_sql(query_text))
+            for node in root.traverse():
+                if isinstance(node, pglast.node.Node):
+                    if isinstance(node.ast_node, pglast.ast.InsertStmt):
+                        assert num_rel_refs == 0
+                        target = node.ast_node.relation.relname
+                        num_rel_refs = 1
+                    elif isinstance(node.ast_node, pglast.ast.UpdateStmt):
+                        assert num_rel_refs == 0
+                        target = node.ast_node.relation.relname
+                        num_rel_refs = 1
+                    elif isinstance(node.ast_node, pglast.ast.DeleteStmt):
+                        assert num_rel_refs == 0
+                        target = node.ast_node.relation.relname
+                        num_rel_refs = 1
+                    elif isinstance(node.ast_node, pglast.ast.SelectStmt) and node.ast_node.fromClause is not None:
+                        for n in node.ast_node.fromClause:
+                            if isinstance(n, pglast.ast.RangeVar):
+                                num_rel_refs = num_rel_refs + 1
+                                if workload_only:
+                                    target = n.relname
+                                else:
+                                    if len(target) == 0:
+                                        target = n.relname
+                                    else:
+                                        target = target + "," + n.relname
 
         for query in QUERY_CONTENT_BLOCK:
             if query_text is not None and query in query_text:
                 query_text = None
         pg_qss_plans.at[plan.Index, "query_text"] = query_text
+        pg_qss_plans.at[plan.Index, "num_rel_refs"] = num_rel_refs
+        pg_qss_plans.at[plan.Index, "target"] = target
     pg_qss_plans.drop(labels=["features"], axis=1, inplace=True)
     pg_qss_plans.drop(pg_qss_plans[pg_qss_plans.query_text.isna()].index, inplace=True)
     pg_qss_plans.reset_index(drop=True, inplace=True)
@@ -502,24 +565,21 @@ def analyze_workload(benchmark, input_dir, output_dir, workload_only, psycopg2_c
     # We don't want to prune the cross-join keys since we need that to determine table_attr_map.
     for key in query_templates:
         query_template_map[key] = {k:v for k,v in query_template_map[key].items()
-                                        if (any([v in table_index_map[t] for t in TABLES]) or any([k in query_template_map[q] for q in query_template_map]))}
+                                        if (any([v in table_index_map[t] for t in tables]) or any([k in query_template_map[q] for q in query_template_map]))}
 
     # We need to define global keys of interest here.
-    for tbl in TABLES:
+    all_useful_attrs = []
+    for tbl in tables:
         old_attr_list = table_attr_map[tbl]
-        new_attr_list = [a for a in old_attr_list if any([a in table_index_map[t] for t in TABLES]) or any([a in query_template_map[q] for q in query_template_map])]
+        new_attr_list = [a for a in old_attr_list if any([a in table_index_map[t] for t in tables]) or any([a in query_template_map[q] for q in query_template_map])]
+        all_useful_attrs.extend(new_attr_list)
         table_attr_map[tbl] = new_attr_list
 
-    # Write useful metadata information to keyspaces.pickle
-    Path(f"{output_dir}/analysis/").mkdir(parents=True, exist_ok=True)
-    with open(f"{output_dir}/analysis/keyspaces.pickle", "wb") as f:
-        pickle.dump(table_attr_map, f)
-        pickle.dump(attr_table_map, f)
-        pickle.dump(table_keyspace_map, f)
-        pickle.dump(query_template_map, f)
-        pickle.dump(window_index_map, f)
+    # Write the metadata out.
+    Path(f"{input_dir}/analysis/").mkdir(parents=True, exist_ok=True)
+    keyspace_metadata_output(f"{input_dir}/analysis/", table_attr_map, attr_table_map, table_keyspace_map, query_template_map, indexoid_name_map, window_index_map)
 
-    analyze(input_dir, output_dir, workload_only, pg_qss_plans, query_template_map, indexoid_table_map)
+    analyze(input_dir, slice_window, workload_only, tables, pg_qss_plans, query_template_map, all_useful_attrs, indexoid_name_map, indexoid_table_map)
 
 
 class AnalyzeWorkloadCLI(cli.Application):
@@ -537,13 +597,6 @@ class AnalyzeWorkloadCLI(cli.Application):
         help="Path to the folder containing the workload input.",
     )
 
-    dir_workload_output = cli.SwitchAttr(
-        "--dir-workload-output",
-        str,
-        mandatory=True,
-        help="Path to the folder containing the output of the analyzed workload.",
-    )
-
     workload_only = cli.SwitchAttr(
         "--workload-only",
         str,
@@ -556,13 +609,18 @@ class AnalyzeWorkloadCLI(cli.Application):
         help="Psycopg2 connection that should be used.",
     )
 
+    slice_window = cli.SwitchAttr(
+        "--slice-window",
+        int,
+        help="Size of the window slice to use for analysis.",
+    )
+
     def main(self):
         b_parts = self.benchmark.split(",")
         input_parts = self.dir_workload_input.split(",")
-        output_parts = self.dir_workload_output.split(",")
-        for i in range(len(output_parts)):
-            logger.info("Processing %s -> %s (%s, %s)", input_parts[i], output_parts[i], b_parts[i], self.workload_only)
-            analyze_workload(b_parts[i], input_parts[i], output_parts[i], (self.workload_only == "True"), self.psycopg2_conn)
+        for i in range(len(input_parts)):
+            logger.info("Processing %s (%s, %s)", input_parts[i], b_parts[i], self.workload_only)
+            analyze_workload(b_parts[i], input_parts[i], self.slice_window, (self.workload_only == "True"), self.psycopg2_conn)
 
 
 if __name__ == "__main__":
