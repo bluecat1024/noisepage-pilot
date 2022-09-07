@@ -602,7 +602,7 @@ def task_behavior_eval_query_plots():
         ]
 
         for (k, v) in vals:
-            if v is not None:
+            if v is not None and v != 'False':
                 eval_args += f"{k} "
 
         if txn_analysis_file is not None:

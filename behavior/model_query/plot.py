@@ -1,3 +1,4 @@
+import gc
 import glob
 import yaml
 import logging
@@ -76,11 +77,11 @@ def generate_predicted_query_error(query_stream, dir_output, min_error_threshold
     width = 0.8
     ticks = []
     labels = []
-    fig, axes = plt.subplots(2, 1, figsize=(25.6, 14.4))
+    fig, axes = plt.subplots(3, 1, figsize=(25.6, 14.4))
 
     txtout = open(dir_output / "select_error.txt", "w")
     frame = query_stream[(query_stream.num_modify == 0)] if "num_modify" in query_stream else query_stream[(query_stream.OP == "SELECT")]
-    modify_col = "modify_target" if "modify_target" in query_stream else "target"
+    modify_col = "target"
     for group in frame.groupby(by=[modify_col]):
         ticks.append(x)
         labels.append(group[0])
@@ -98,6 +99,10 @@ def generate_predicted_query_error(query_stream, dir_output, min_error_threshold
 
                 rect = axes[1].bar(x, qgroup.elapsed_us / qgroup.cnt, width=width, color=colors[idx])[0]
                 axes[1].text(rect.get_x() + rect.get_width() / 2., 1.05 * rect.get_height(), '%d' % (qgroup.elapsed_us / qgroup.cnt), ha='center', va='bottom')
+
+                rect = axes[2].bar(x, qgroup.pred_elapsed_us / qgroup.cnt, width=width, color=colors[idx])[0]
+                axes[2].text(rect.get_x() + rect.get_width() / 2., 1.05 * rect.get_height(), '%d' % (qgroup.pred_elapsed_us / qgroup.cnt), ha='center', va='bottom')
+
                 txtout.write(f"{qgroup.Index} avg. predicted/true: {error} / {qgroup.elapsed_us / qgroup.cnt}\n")
 
                 x += width
@@ -112,6 +117,10 @@ def generate_predicted_query_error(query_stream, dir_output, min_error_threshold
     axes[1].set_ylabel("Avg. Elapsed Runtime (sum(elapsed) / cnt)")
     axes[1].set_xticks(ticks, minor=False)
     axes[1].set_xticklabels(labels, fontdict=None, minor=False)
+
+    axes[2].set_ylabel("Avg. Pred Elapsed Runtime (sum(pred) / cnt)")
+    axes[2].set_xticks(ticks, minor=False)
+    axes[2].set_xticklabels(labels, fontdict=None, minor=False)
     plt.savefig(dir_output / "summary_select.png")
     plt.close()
     txtout.close()
@@ -126,7 +135,7 @@ def generate_predicted_query_error_modify(query_stream, dir_output):
     txtout = open(dir_output / "modify_error.txt", "w")
 
     frame = query_stream[(query_stream.num_modify != 0)] if "num_modify" in query_stream else query_stream[(query_stream.OP != "SELECT")]
-    modify_col = "modify_target" if "modify_target" in query_stream else "target"
+    modify_col = "target"
     for group in frame.groupby(by=[modify_col]):
         ticks.append(x)
         labels.append(group[0])
@@ -293,8 +302,8 @@ def generate_txn_plots(query_stream, output_dir, txn_analysis_file):
         plt.close()
 
         fig, axes = plt.subplots(1, 1, figsize=(12.8, 7.2))
-        df.txn_elapsed_us.hist(cumulative=True, density=True, bins=100, ax=axes, color='r')
-        df.txn_pred_elapsed_us.hist(cumulative=True, density=True, bins=100, ax=axes, color='b')
+        df.txn_elapsed_us.hist(cumulative=True, density=True, histtype='step', bins=100, ax=axes, color='r')
+        df.txn_pred_elapsed_us.hist(cumulative=True, density=True, histtype='step', bins=100, ax=axes, color='b')
         plt.savefig(output_dir / f"{txn_name}_cdf.png")
         plt.close()
 
@@ -339,6 +348,10 @@ def main(dir_input, txn_analysis_file, generate_summary, generate_holistic, gene
                 sub_output.mkdir(parents=True, exist_ok=True)
                 generate_plots(query_stream, sub_output, generate_summary, generate_holistic, generate_per_query, generate_predict_abs_errors)
                 generate_txn_plots(query_stream, sub_output, txn_analysis_file)
+
+        del query_stream
+        del consider_streams
+        gc.collect()
 
 
 class EvalQueryPlotsCLI(cli.Application):

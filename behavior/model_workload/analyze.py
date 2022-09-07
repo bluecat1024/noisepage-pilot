@@ -494,7 +494,7 @@ def analyze_workload(benchmark, input_dir, slice_window, workload_only, psycopg2
                         for n in node.ast_node.fromClause:
                             if isinstance(n, pglast.ast.RangeVar):
                                 num_rel_refs = num_rel_refs + 1
-                                if workload_only:
+                                if not workload_only:
                                     target = n.relname
                                 else:
                                     if len(target) == 0:
