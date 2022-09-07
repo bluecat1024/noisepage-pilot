@@ -12,9 +12,9 @@ ARTIFACTS_PATH = default_artifacts_path()
 BUILD_PATH = default_build_path()
 DEFAULT_POSTGRESQL_CONF_PATH = Path("config/postgres/default_postgresql.conf").absolute()
 
-DEFAULT_DB = "noisepage"
-DEFAULT_USER = "terrier"
-DEFAULT_PASS = "woof"
+DEFAULT_DB = "benchbase_gcn"
+DEFAULT_USER = "su_gcn"
+DEFAULT_PASS = "pass_gcn"
 DEFAULT_PGDATA = "pgdata"
 
 # Output: various useful binaries and folders.
@@ -100,12 +100,16 @@ def task_noisepage_init():
     """
     NoisePage: start a clean NoisePage instance in detached mode.
     """
+    global_dbname = "benchbase_gcn"
 
-    def run_noisepage_detached(config):
+    def run_noisepage_detached(config, dbname):
         assert Path(config).exists(), f"{config} does not exist."
         local["cp"][f"{config}", f"{DEFAULT_PGDATA}/postgresql.conf"].run_nohup()
         ret = local["./pg_ctl"]["start", "-D", DEFAULT_PGDATA].run_nohup(stdout="noisepage.out")
         print(f"NoisePage PID: {ret.pid}")
+
+        global global_dbname
+        global_dbname = dbname
 
     sql_list = [
         f"CREATE ROLE {DEFAULT_USER} WITH LOGIN SUPERUSER ENCRYPTED PASSWORD '{DEFAULT_PASS}'",
@@ -119,8 +123,8 @@ def task_noisepage_init():
             f"./initdb {DEFAULT_PGDATA}",
             run_noisepage_detached,
             "until ./pg_isready ; do sleep 1 ; done",
-            f"./createdb {DEFAULT_DB}",
-            *[f'./psql --dbname={DEFAULT_DB} --command="{sql}"' for sql in sql_list],
+            f"./createdb {global_dbname}",
+            *[f'./psql --dbname={global_dbname} --command="{sql}"' for sql in sql_list],
             # Reset working directory.
             lambda: os.chdir(doit.get_initial_workdir()),
         ],
@@ -133,6 +137,12 @@ def task_noisepage_init():
                 "long": "config",
                 "help": "Path to the postgresql.conf configuration file.",
                 "default": DEFAULT_POSTGRESQL_CONF_PATH,
+            },
+            {
+                "name": "dbname",
+                "long": "dbname",
+                "help": "Database name",
+                "default": DEFAULT_DB,
             },
         ],
     }
@@ -252,6 +262,11 @@ def task_noisepage_qss_install():
             )
             WITH (autovacuum_enabled = OFF)""",
         "ALTER SYSTEM SET shared_preload_libraries='qss','pgstattuple'",
+        "ALTER SYSTEM SET qss_capture_enabled = ON",
+        "ALTER SYSTEM SET qss_capture_nested = ON",
+        "ALTER SYSTEM SET qss_capture_exec_stats = ON",
+        "ALTER SYSTEM SET qss_output_noisepage = OFF",
+        "ALTER SYSTEM SET log_statement='none'",
         "DROP EXTENSION IF EXISTS qss",
         "DROP EXTENSION IF EXISTS pgstattuple",
         "CREATE EXTENSION qss",

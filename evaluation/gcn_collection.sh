@@ -3,6 +3,7 @@
 export DB_USER="su_gcn"
 export DB_PASS="pass_gcn"
 export DB_NAME="benchbase_gcn"
+export PG_PATH="artifacts/noisepage"
 
 
 # Setup the database using the global constants.
@@ -44,7 +45,7 @@ _dump_database() {
 
   # Dump the project database into directory format.
   rm -rf "./${dump_path}"
-  PGPASSWORD=$DB_PASS pg_dump --host=localhost --username=$DB_USER --format=directory --file=./${dump_path} $DB_NAME
+  PGPASSWORD=$DB_PASS "${PG_PATH}/pg_dump" --host=localhost --username=$DB_USER --format=directory --file=./${dump_path} $DB_NAME
 
   echo "Dumped database to: ${dump_path}"
 }
@@ -53,13 +54,13 @@ _restore_database() {
   dump_path="${1}"
 
   # Restore the project database from directory format.
-  PGPASSWORD=${DB_PASS} pg_restore --host=localhost --username=$DB_USER --clean --if-exists --dbname=${DB_NAME} ./${dump_path}
+  PGPASSWORD=${DB_PASS} "${PG_PATH}/pg_restore" --host=localhost --username=$DB_USER --clean --if-exists --dbname=${DB_NAME} ./${dump_path}
 
   echo "Restored database from: ${dump_path}"
 }
 
 _clear_log_folder() {
-  sudo bash -c "rm -rf /var/lib/postgresql/14/main/log/*"
+  sudo bash -c "rm -rf ${PG_PATH}/pgdata/log/*"
   echo "Cleared all query logs."
 }
 
@@ -68,7 +69,7 @@ _copy_logs() {
 
   # TODO(WAN): Is there a way to ensure all flushed?
   sleep 10
-  sudo bash -c "cat /var/lib/postgresql/14/main/log/*.csv > ${save_path}"
+  sudo bash -c "cat ${PG_PATH}/pgdata/log/*.csv > ${save_path}"
   echo "Copied all query logs to: ${save_path}"
 }
 
@@ -105,6 +106,8 @@ benchmark_dump_folder="./artifacts/project/dumps"
 # Create the folder for all the benchmark dumps.
 mkdir -p "./${benchmark_dump_folder}"
 
+doit noisepage_init --dbname="benchbase_gcn"
+
 benchmark_dump_path="./${benchmark_dump_folder}/${benchmark}_primary"
 if [ "${createnewdb}" == "1" ]; then
     _setup_database 
@@ -117,15 +120,16 @@ fi
 
 _change_exec_conf "${benchmark}" "${nterminal}"
 
-doit project1_enable_logging
-doit enable_pg_autoexplain
+doit noisepage_enable_logging
+#doit enable_pg_autoexplain
+doit noisepage_qss_install
 doit benchbase_run --benchmark="${benchmark}" --config="./artifacts/project/${benchmark}_config.xml" --args="--execute=true"
-doit project1_disable_logging
+doit noisepage_disable_logging
 
 workload_csv_folder="./artifacts/project/${benchmark}_${scalefactor}_${nterminal}"
 mkdir -p ${workload_csv_folder}
 workload_csv="${workload_csv_folder}/workload.csv"
 _copy_logs "${workload_csv}"
-_clear_log_folder
+# _clear_log_folder
 
 
