@@ -281,29 +281,33 @@ def generate_txn_plots(query_stream, output_dir, txn_analysis_file):
         df["order"] = df.index
 
         fig, axes = plt.subplots(4, 1, figsize=(25.6, 14.4))
-        ax = axes[0]
+        x_min = min(df.txn_elapsed_us.min(), df.txn_pred_elapsed_us.min())
+        x_max = max(df.txn_elapsed_us.max(), df.txn_pred_elapsed_us.max())
 
         # Plot the true transaction elapsed us as a bar graph.
         # Try to plot the KDE too..
-        df.plot(title=f"{txn_name} Elapsed Us", x="order", y="txn_elapsed_us", color='r', ax=ax, kind='bar')
-        axes[1].set_xlim(min(df.txn_elapsed_us.min(), df.txn_pred_elapsed_us.min()), max(df.txn_elapsed_us.max(), df.txn_pred_elapsed_us.max()))
-        df.txn_elapsed_us.plot.kde(color='b', ax=axes[1])
-        ax.set_xticks([])
+        df.txn_elapsed_us.plot.kde(color='b', ax=axes[0])
+        axes[0].set_title(f"{txn_name} elapsed us")
+        axes[0].set_xlim(x_min, x_max)
+
+        df.txn_elapsed_us.hist(bins=1000, color='b', ax=axes[1])
+        axes[1].set_xlim(x_min, x_max)
 
         # Plot the predicted transaction elapsed us as a bar graph.
-        ax = axes[2]
-        df.plot(title=f"{txn_name} Predicted Elapsed Us", x="order", y="txn_pred_elapsed_us", color='r', ax=ax, kind='bar')
         if df.txn_pred_elapsed_us.nunique() > 1:
-            df.txn_pred_elapsed_us.plot.kde(color='b', ax=axes[3])
-            axes[3].set_xlim(min(df.txn_elapsed_us.min(), df.txn_pred_elapsed_us.min()), max(df.txn_elapsed_us.max(), df.txn_pred_elapsed_us.max()))
-        ax.set_xticks([])
+            df.txn_pred_elapsed_us.plot.kde(color='r', ax=axes[2])
+            axes[2].set_title(f"{txn_name} pred elapsed us")
+            axes[2].set_xlim(x_min, x_max)
 
-        plt.savefig(output_dir / f"{txn_name}_kde.png")
+        df.txn_pred_elapsed_us.hist(bins=1000, color='r', ax=axes[3])
+        axes[3].set_xlim(x_min, x_max)
+
+        plt.savefig(output_dir / f"{txn_name}_dist.png")
         plt.close()
 
         fig, axes = plt.subplots(1, 1, figsize=(12.8, 7.2))
-        df.txn_elapsed_us.hist(cumulative=True, density=True, histtype='step', bins=100, ax=axes, color='r')
-        df.txn_pred_elapsed_us.hist(cumulative=True, density=True, histtype='step', bins=100, ax=axes, color='b')
+        df.txn_elapsed_us.hist(cumulative=True, density=True, histtype='step', bins=100, ax=axes, color='r', alpha=0.5)
+        df.txn_pred_elapsed_us.hist(cumulative=True, density=True, histtype='step', bins=100, ax=axes, color='b', alpha=0.5)
         plt.savefig(output_dir / f"{txn_name}_cdf.png")
         plt.close()
 
