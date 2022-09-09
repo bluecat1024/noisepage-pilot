@@ -66,6 +66,7 @@ def prepare_qss_plans(plans_df):
                 'statement_timestamp': row.statement_timestamp,
                 'plan_node_id': plan["plan_node_id"],
                 'plan_feature_idx': slot,
+                'generation': row.generation,
             }
             new_df_tuples.append(new_tuple)
 
@@ -130,7 +131,7 @@ def merge_ou_with_features(ou_df, plans_df, new_plan_features):
     assert plans_df.index.is_monotonic_increasing
     ou_df.set_index(keys=["statement_timestamp"], drop=True, append=False, inplace=True)
     ou_df.sort_index(axis=0, inplace=True)
-    ou_df = pd.merge_asof(ou_df, plans_df, left_index=True, right_index=True, by=["query_id", "db_id", "pid", "plan_node_id"], allow_exact_matches=True)
+    ou_df = pd.merge_asof(ou_df, plans_df, left_index=True, right_index=True, by=["query_id", "db_id", "pid", "plan_node_id", "generation"], allow_exact_matches=True)
 
     # Drop all rows that fail to find a corresponding match.
     ou_df.reset_index(drop=False, inplace=True)

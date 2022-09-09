@@ -205,4 +205,9 @@ DERIVED_FEATURES_MAP = {
     "BitmapHeapScan_num_empty_tuples": "counter1",
     "BitmapHeapScan_num_tuples_fetch": "counter2",
     "BitmapHeapScan_num_blocks_prefetch": "counter3",
+
+    "blk_hit": "blk_hit",
+    "blk_miss": "blk_miss",
+    "blk_dirty": "blk_dirty",
+    "blk_write": "blk_write",
 }
