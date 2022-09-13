@@ -183,7 +183,7 @@ def task_workload_prepare_train():
     """
     Workload Analysis: construct training data from windows.
     """
-    def prepare_train(input_workload):
+    def prepare_train(input_workload, hist_length):
         assert input_workload is not None
 
         for iw in input_workload.split(","):
@@ -191,6 +191,7 @@ def task_workload_prepare_train():
 
         eval_args = (
             f"--dir-workload-input {input_workload} "
+            f"--hist-length {hist_length} "
         )
 
         return f"python3 -m behavior workload_prepare_train {eval_args}"
@@ -206,6 +207,12 @@ def task_workload_prepare_train():
                 "help": "Path to the input workload that should be analyzed.",
                 "default": None,
             },
+            {
+                "name": "hist_length",
+                "long": "hist_length",
+                "help": "Length of histogram featurization to use.",
+                "default": 10,
+            },
         ],
     }
 
@@ -215,7 +222,7 @@ def task_workload_train():
     Workload Analysis: train workload models.
     """
 
-    def train_cmd(input_data, output_dir, separate, val_size, lr, epochs, batch_size, hidden_size, cuda):
+    def train_cmd(input_data, output_dir, separate, val_size, lr, epochs, batch_size, hidden_size, hist_length, cuda):
         if not Path(output_dir).is_absolute():
             # Make it a relative path to ARTIFACT_MODELS.
             output_dir = ARTIFACT_MODELS / output_dir
@@ -228,6 +235,7 @@ def task_workload_train():
             f"--epochs {epochs} "
             f"--batch-size {batch_size} "
             f"--hidden-size {hidden_size} "
+            f"--hist-length {hist_length} "
         )
 
         if cuda is not None:
@@ -293,6 +301,13 @@ def task_workload_train():
                 "help": "Number of hidden units.",
                 "type": int,
                 "default": 256,
+            },
+            {
+                "name": "hist_length",
+                "long": "hist_length",
+                "help": "Length of histogram featurization.",
+                "type": int,
+                "default": 10,
             },
             {
                 "name": "cuda",

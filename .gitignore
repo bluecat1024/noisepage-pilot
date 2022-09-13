@@ -31,4 +31,3 @@ dist/
 
 *.so
 run.sh
-config/behavior/skynet.yaml

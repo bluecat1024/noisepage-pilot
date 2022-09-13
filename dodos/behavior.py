@@ -22,7 +22,6 @@ BUILD_PATH = default_build_path()
 # Input: various configuration files.
 DATAGEN_CONFIG_FILE = Path("config/behavior/datagen.yaml").absolute()
 MODELING_CONFIG_FILE = Path("config/behavior/modeling.yaml").absolute()
-SKYNET_CONFIG_FILE = Path("config/behavior/skynet.yaml").absolute()
 POSTGRESQL_CONF = Path("config/postgres/default_postgresql.conf").absolute()
 
 # Output: model directory.
@@ -35,21 +34,6 @@ ARTIFACT_MODELS = ARTIFACTS_PATH / "models"
 ARTIFACT_EVALS_OU = ARTIFACTS_PATH / "evals_ou"
 ARTIFACT_EVALS_QUERY = ARTIFACTS_PATH / "evals_query"
 ARTIFACT_EVALS_QUERY_WORKLOAD = ARTIFACTS_PATH / "evals_query_workload"
-
-
-def task_behavior_skynet():
-    """
-    Behavior: Generate a run.sh script for executing an end-to-end pipeline.
-    """
-    skynet_args = (
-        f"--config-file {SKYNET_CONFIG_FILE} "
-    )
-
-    return {
-        "actions": [f"python3 -m behavior skynet {skynet_args}",],
-        "uptodate": [False],
-        "verbosity": VERBOSITY_DEFAULT,
-    }
 
 
 def task_behavior_generate_workloads():

@@ -21,7 +21,7 @@ from behavior.model_workload.utils import keyspace_metadata_read
 logger = logging.getLogger("gen_train")
 
 
-def gen_train(input_dir):
+def gen_train(input_dir, hist_length):
     table_attr_map, attr_table_map, table_keyspace_map, _, _, window_index_map = keyspace_metadata_read(f"{input_dir}/analysis")
     tables = table_attr_map.keys()
 
@@ -81,7 +81,7 @@ def gen_train(input_dir):
                 table_tuple = window_data.iloc[true_window_index]
                 table_tuple["ff"] = tbl_optmap[tbl]
 
-                point = WorkloadModel.featurize(query_data[query_data.target_index_name.isna()], input_data, table_tuple, tbl_keyspace, train=True, next_table_tuple=next_table_tuple)
+                point = WorkloadModel.featurize(query_data[query_data.target_index_name.isna()], input_data, table_tuple, tbl_keyspace, hist_length, train=True, next_table_tuple=next_table_tuple)
                 accum_base_data.append(point)
 
             # FIXME(INDEX): We currently don't have the correct training data. Sigh.
@@ -102,11 +102,18 @@ class GenerateTrainCLI(cli.Application):
         help="Path to the folder containing the workload input.",
     )
 
+    hist_length = cli.SwitchAttr(
+        "--hist-length",
+        int,
+        mandatory=True,
+        help="Length of histogram featurization.",
+    )
+
     def main(self):
         input_parts = self.dir_workload_input.split(",")
         for i in range(len(input_parts)):
             logger.info("Processing %s", input_parts[i])
-            gen_train(input_parts[i])
+            gen_train(input_parts[i], self.hist_length)
 
 if __name__ == "__main__":
     GenerateTrainCLI.run()

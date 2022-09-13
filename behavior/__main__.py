@@ -2,7 +2,6 @@ import logging
 
 from plumbum import cli
 
-from behavior import skynet
 from behavior.datagen import generate_workloads
 from behavior.datagen import pg_collector
 from behavior.model_ous.process import extract_ou
@@ -31,7 +30,6 @@ class BehaviorCLI(cli.Application):
 
 if __name__ == "__main__":
     logging.basicConfig(format="%(levelname)s:%(asctime)s %(message)s", level=logging.INFO)
-    BehaviorCLI.subcommand("skynet", skynet.SkynetCLI)
     BehaviorCLI.subcommand("generate_workloads", generate_workloads.GenerateWorkloadsCLI)
     BehaviorCLI.subcommand("collector", pg_collector.CollectorCLI)
 

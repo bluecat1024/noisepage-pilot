@@ -35,7 +35,7 @@ from behavior.utils.process_pg_state_csvs import (
     merge_modifytable_data,
     build_time_index_metadata
 )
-from behavior.model_workload.model import WorkloadModel, MODEL_WORKLOAD_TARGETS, NORM_RELATIVE_OPS
+from behavior.model_workload.model import WorkloadModel, MODEL_WORKLOAD_TABLE_STATS_TARGETS, MODEL_WORKLOAD_TARGETS, NORM_RELATIVE_OPS
 from behavior.model_workload.utils import compute_frames as compute_frames_change
 import torch
 
@@ -712,16 +712,21 @@ def generate_query_ous(conn, compute_frames, use_workload_table_estimates, input
                 keyspace = table_keyspace_map[tbl][tbl]
 
             data = data_map[tbl].copy() if tbl in data_map else None
-            inputs = WorkloadModel.featurize(queries, data, window_stats[tbl], keyspace, train=False)
+            inputs = WorkloadModel.featurize(queries, data, window_stats[tbl], keyspace, workload_model.get_hist_length(), train=False)
             inputs = workload_model.prepare_inputs(pd.DataFrame([inputs]), train=False)
             batch = next(iter(torch.utils.data.DataLoader(inputs, batch_size=1)))
 
             prediction = workload_model.predict(*batch)[0]
-            for i, target in enumerate(MODEL_WORKLOAD_TARGETS):
+            for i, target in enumerate(workload_model.get_targets()):
                 window_stats[tbl][target] = prediction[i].item()
 
                 if target == "extend_percent" or target == "defrag_percent" or target == "hot_percent":
                     window_stats[tbl][target] = max(0, min(1, window_stats[tbl][target]))
+
+        with open(f"{scratch_ous}/state.pickle.{chunk_num}", "wb") as f:
+            # Redump the predictions.
+            pickle.dump(window_stats, f)
+            pickle.dump(index_stats, f)
 
         # Generate all the query operating units for this chunk.
         generate_ous_for_chunk(conn, workload_model, chunk_num, query_chunk, augment_chunk, window_stats, index_stats, index_table_map, index_keyspace_map, table_oid_map, trigger_map, scratch_ous)

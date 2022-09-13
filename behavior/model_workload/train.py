@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader
 
 import logging
 from plumbum import cli
-from behavior.model_workload.model import WorkloadModel, MODEL_WORKLOAD_TARGETS
+from behavior.model_workload.model import WorkloadModel, MODEL_WORKLOAD_TABLE_STATS_TARGETS, MODEL_WORKLOAD_TARGETS
 
 
 logger = logging.getLogger("train")
@@ -40,7 +40,7 @@ def loss_fn(preds, labels):
     return loss(preds, labels)
 
 
-def print_loss(preds, labels):
+def print_loss(preds, labels, targets):
     loss_segs = []
     assert len(preds) > 0
     for j in range(len(preds[0])):
@@ -51,7 +51,7 @@ def print_loss(preds, labels):
         loss_segs.append(loss_seg)
 
     for i in range(len(loss_segs)):
-        logger.info("L1 Statistics for target: %s", MODEL_WORKLOAD_TARGETS[i])
+        logger.info("L1 Statistics for target: %s", targets[i])
         loss_seg = loss_segs[i]
 
         logger.info("Average: %s", np.mean(loss_seg))
@@ -64,9 +64,12 @@ def print_loss(preds, labels):
         logger.info("")
 
 
-def predict(model, data_loader, separate, cuda):
+def predict(model, data_loader, separate, model_targets, cuda):
     preds = []
     targets = []
+
+    if cuda:
+        model.cudify()
 
     for batch_idx, data_batch in enumerate(data_loader):
         if cuda:
@@ -82,15 +85,19 @@ def predict(model, data_loader, separate, cuda):
         preds.extend(outputs)
         targets.extend(target)
 
-    print_loss(preds, targets)
+    print_loss(preds, targets, model_targets)
 
 
-def train(patterns, output_dir, separate, val_size, lr, num_epochs, batch_size, hid_units, cuda):
-    train_data, val_data = get_dataset(patterns, val_size)
-    model = WorkloadModel()
-    model.init_model(hid_units, separate)
-
+def train(patterns, output_dir, separate, val_size, lr, num_epochs, batch_size, hid_units, hist_length, cuda, table_stats):
+    global logger
     Path(output_dir).mkdir(parents=True, exist_ok=True)
+    file_handler = logging.FileHandler(Path(output_dir) / "output.log", mode="w")
+    logger.addHandler(file_handler)
+
+    train_data, val_data = get_dataset(patterns, val_size)
+    targets = MODEL_WORKLOAD_TABLE_STATS_TARGETS if table_stats else MODEL_WORKLOAD_TARGETS
+    model = WorkloadModel()
+    model.init_model(hid_units, separate, hist_length, targets)
 
     target_model, target_idx, target_name = model.get_next_model()
     best_state_dict = None
@@ -106,10 +113,6 @@ def train(patterns, output_dir, separate, val_size, lr, num_epochs, batch_size, 
         optimizer = torch.optim.Adam(target_model.parameters(), lr=lr)
         process_train_data = model.prepare_inputs(train_data, target_idx=target_idx, train=True)
         train_data_loader = DataLoader(process_train_data, batch_size=batch_size)
-
-        if val_data is not None:
-            process_val_data = model.prepare_inputs(val_data, target_idx=target_idx, train=True)
-            val_data_loader = DataLoader(process_val_data, batch_size=batch_size)
 
         # Begin training the model over the number of epochs.
         if cuda:
@@ -169,13 +172,13 @@ def train(patterns, output_dir, separate, val_size, lr, num_epochs, batch_size, 
 
         # Get final training and validation set predictions
         logger.info("Training Loss Information:")
-        predict(model, train_data_loader, separate, cuda)
+        predict(model, train_data_loader, separate, targets, cuda)
 
         if val_data is not None:
             logger.info("Validation Loss Information:")
             process_val_data = model.prepare_inputs(val_data, target_idx=None, train=True)
             val_data_loader = DataLoader(process_val_data, batch_size=batch_size)
-            predict(model, val_data_loader, separate, cuda)
+            predict(model, val_data_loader, separate, targets, cuda)
 
 
 class WorkloadTrainCLI(cli.Application):
@@ -230,14 +233,27 @@ class WorkloadTrainCLI(cli.Application):
         help="Number of hidden units to use.",
     )
 
+    hist_length = cli.SwitchAttr(
+        "--hist-length",
+        int,
+        mandatory=True,
+        help="Size of the histogram that describes the data.",
+    )
+
     cuda = cli.Flag(
         "--cuda",
         default=False,
         help="Whether to use CUDA.",
     )
 
+    table_stats = cli.Flag(
+        "--table-stats",
+        default=False,
+        help="Whether to create a model that can perform table stats inference.",
+    )
+
     def main(self):
-        train(self.dir_input, self.dir_output, self.separate == "True", self.val_size, self.lr, self.epochs, self.batch_size, self.hidden_size, self.cuda)
+        train(self.dir_input, self.dir_output, self.separate == "True", self.val_size, self.lr, self.epochs, self.batch_size, self.hidden_size, self.hist_length, self.cuda, self.table_stats)
 
 
 if __name__ == "__main__":

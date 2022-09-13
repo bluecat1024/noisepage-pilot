@@ -17,19 +17,23 @@ from torch.utils.data import DataLoader
 
 # Model Parameters
 EPS = 1e-6
-HISTOGRAM_LENGTH = 11
-HISTOGRAM_POSITIONS = np.arange(0, 1.0 + 1.0 / (HISTOGRAM_LENGTH - 1), 1.0 / (HISTOGRAM_LENGTH - 1))
 
 EMPTY_HIST_VALUE_FILL = -1.0
 UNIQUE_HIST_VALUE_FILL = 1.0
-NORM_RELATIVE_OPS = 100
 
-MODEL_WORKLOAD_TARGETS = [
+NORM_RELATIVE_OPS = 100
+MODEL_WORKLOAD_TABLE_STATS_TARGETS = [
     "norm_delta_free_percent",
     "norm_delta_dead_percent",
     "norm_delta_table_len",
     "norm_delta_tuple_count",
 
+    "extend_percent",
+    "defrag_percent",
+    "hot_percent",
+]
+
+MODEL_WORKLOAD_TARGETS = [
     "extend_percent",
     "defrag_percent",
     "hot_percent",
@@ -64,18 +68,15 @@ class WorkloadModelInternal(nn.Module):
     def __setitem__(self, key, value):
         setattr(self, key, value)
 
-    def __init__(self, hid_units, num_outputs):
+    def __init__(self, hid_units, hist_length, num_outputs):
         super(WorkloadModelInternal, self).__init__()
 
         for (k, nn1, nn2) in MODEL_WORKLOAD_HIST_INPUTS:
-            self[nn1] = nn.Linear(HISTOGRAM_LENGTH, hid_units)
+            self[nn1] = nn.Linear(hist_length, hid_units)
             self[nn2] = nn.Linear(hid_units, hid_units)
-            self[nn1 + "dropout"] = nn.AlphaDropout(p=0.2)
-            self[nn2 + "dropout"] = nn.AlphaDropout(p=0.2)
 
         self.out_mlp1 = nn.Linear(hid_units * len(MODEL_WORKLOAD_HIST_INPUTS) + len(MODEL_WORKLOAD_NORMAL_INPUTS), hid_units)
         self.out_mlp2 = nn.Linear(hid_units, num_outputs)
-        self.out_dropout = nn.AlphaDropout(p=0.2)
         self.hid_units = hid_units
         self.num_outputs = num_outputs
 
@@ -92,13 +93,11 @@ class WorkloadModelInternal(nn.Module):
         for (key, nn1, nn2) in MODEL_WORKLOAD_HIST_INPUTS:
             s0 = self[nn1]
             s1 = self[nn2]
-            d0 = self[nn1 + "dropout"]
-            d1 = self[nn2 + "dropout"]
             data = locals()[f"{key}_dist"]
             mask = locals()[f"{key}_dist_mask"]
 
-            output = d0(F.leaky_relu(s0(data)))
-            output = d1(F.leaky_relu(s1(output)))
+            output = F.leaky_relu(s0(data))
+            output = F.leaky_relu(s1(output))
             output = output * mask
             output = torch.sum(output, dim=1, keepdim=False)
             norm = mask.sum(1, keepdim=False)
@@ -107,7 +106,7 @@ class WorkloadModelInternal(nn.Module):
 
         outputs.append(nonhist_inputs)
         cat = torch.cat(tuple(o for o in outputs), 1)
-        cat = self.out_dropout(F.leaky_relu(self.out_mlp1(cat)))
+        cat = F.leaky_relu(self.out_mlp1(cat))
         out = self.out_mlp2(cat)
         return out
 
@@ -115,14 +114,29 @@ class WorkloadModelInternal(nn.Module):
 class WorkloadModel:
     def save(self, output_dir):
         if self.model is not None:
-            torch.save(self.model.state_dict(), Path(output_dir) / "combined_model.pt")
+            d = self.model.state_dict()
+            d["hist_length"] = self.hist_length
+            d["targets"] = self.targets
+            torch.save(d, Path(output_dir) / "combined_model.pt")
         else:
             for i, model in enumerate(self.models):
-                torch.save(model.state_dict(), Path(output_dir) / f"model_target_{i}.pt")
+                d = model.state_dict()
+                d["hist_length"] = self.hist_length
+                d["targets"] = self.targets
+                torch.save(d, Path(output_dir) / f"model_target_{i}.pt")
 
     def save_partial(self, output_dir, end):
         for i, model in enumerate(self.models[:end + 1]):
-            torch.save(model.state_dict(), Path(output_dir) / f"model_target_{i}.pt")
+            d = model.state_dict()
+            d["hist_length"] = self.hist_length
+            d["targets"] = self.targets
+            torch.save(d, Path(output_dir) / f"model_target_{i}.pt")
+
+    def get_hist_length(self):
+        return self.hist_length
+
+    def get_targets(self):
+        return self.targets
 
     def load(self, output_dir):
         if (Path(output_dir) / "combined_model.pt").exists():
@@ -130,7 +144,10 @@ class WorkloadModel:
             state_dict = torch.load(f)
             hid_units = state_dict["hid_units"]
             num_outputs = state_dict["num_outputs"]
-            self.model = WorkloadModelInternal(hid_units, num_outputs)
+            self.hist_length = state_dict["hist_length"]
+            self.targets = state_dict["targets"]
+
+            self.model = WorkloadModelInternal(hid_units, self.hist_length, num_outputs)
             self.model.load_state_dict(state_dict, strict=False)
         else:
             self.models = []
@@ -140,23 +157,29 @@ class WorkloadModel:
                 state_dict = torch.load(model)
                 hid_units = state_dict["hid_units"]
                 num_outputs = state_dict["num_outputs"]
+                self.hist_length = state_dict["hist_length"]
+                self.targets = state_dict["targets"]
 
-                model = WorkloadModelInternal(hid_units, num_outputs)
+                model = WorkloadModelInternal(hid_units, self.hist_length, num_outputs)
                 model.load_state_dict(state_dict, strict=False)
                 self.models.append(model)
             self.model = None
 
-    def init_model(self, hid_units, separate):
+    def init_model(self, hid_units, separate, hist_length, targets):
         # Initialize all the models.
         if separate:
             self.models = []
-            for _ in range(len(MODEL_WORKLOAD_TARGETS)):
-                self.models.append(WorkloadModelInternal(hid_units, 1))
+            for _ in range(len(targets)):
+                self.models.append(WorkloadModelInternal(hid_units, hist_length, 1))
             self.next = 0
             self.model = None
+            self.hist_length = hist_length
+            self.targets = targets
         else:
-            self.model = WorkloadModelInternal(hid_units, len(MODEL_WORKLOAD_TARGETS))
+            self.model = WorkloadModelInternal(hid_units, hist_length, len(targets))
             self.next = 0
+            self.hist_length = hist_length
+            self.targets = targets
 
     def get_next_model(self):
         if self.model is not None:
@@ -172,7 +195,14 @@ class WorkloadModel:
             target = self.models[self.next]
             target_val = self.next
             self.next = self.next + 1
-            return target, target_val, f"model_target_{target_val}"
+            return target, target_val, f"model_target_{target_val}.pt"
+
+    def cudify(self):
+        if self.model is not None:
+            self.model.cuda()
+        else:
+            for model in self.models:
+                model.cuda()
 
     @torch.no_grad()
     def predict(self, *args):
@@ -197,9 +227,9 @@ class WorkloadModel:
         nonhist_inputs = torch.tensor(features[MODEL_WORKLOAD_NORMAL_INPUTS].to_numpy(dtype=np.float32))
         if train:
             if target_idx is None:
-                targets = torch.tensor(features[MODEL_WORKLOAD_TARGETS].to_numpy(dtype=np.float32))
+                targets = torch.tensor(features[self.targets].to_numpy(dtype=np.float32))
             else:
-                targets = torch.tensor(features[MODEL_WORKLOAD_TARGETS[target_idx]].to_numpy(dtype=np.float32))
+                targets = torch.tensor(features[self.targets[target_idx]].to_numpy(dtype=np.float32))
 
         output_tensors = {}
         for (k, _, _) in MODEL_WORKLOAD_HIST_INPUTS:
@@ -213,7 +243,7 @@ class WorkloadModel:
                     # Unfortunately, I think we do need to set something so we don't drive the set to nan.
                     # or collapse the tensor inappropriately. The (hope) insight is that it should learn that
                     # a 0 vector input means "nothing is useful"....
-                    records = np.full((max_block, HISTOGRAM_LENGTH), EMPTY_HIST_VALUE_FILL)
+                    records = np.full((max_block, self.hist_length), EMPTY_HIST_VALUE_FILL)
                     mask = np.ones((max_block, 1))
                     values.append(records)
                     masks.append(mask)
@@ -223,7 +253,7 @@ class WorkloadModel:
                 records = np.vstack(record)
                 rows_to_pad = max_block - records.shape[0]
                 mask = np.ones_like(records).mean(1, keepdims=True)
-                assert records.shape[1] == HISTOGRAM_LENGTH
+                assert records.shape[1] == self.hist_length
                 records = np.pad(records, ((0, rows_to_pad), (0, 0)), mode="constant")
                 mask = np.pad(mask, ((0, rows_to_pad), (0, 0)), 'constant')
                 values.append(records)
@@ -242,7 +272,8 @@ class WorkloadModel:
                                          *[output_tensors[k] for k in output_tensors.keys() if k.endswith("_dist")],
                                          *[output_tensors[k] for k in output_tensors.keys() if k.endswith("_dist_mask")])
 
-    def featurize(queries, data, table_data, keyspace, train=True, next_table_tuple=None):
+    @staticmethod
+    def featurize(queries, data, table_data, keyspace, hist_length, train=True, next_table_tuple=None):
         num_insert = queries[queries.OP == "INSERT"].num_modify.sum()
         num_update = queries[queries.OP == "UPDATE"].num_modify.sum()
         num_delete = queries[queries.OP == "DELETE"].num_modify.sum()
@@ -260,17 +291,17 @@ class WorkloadModel:
         # Requires that if data is not valid, then there are no keys.
         assert data is not None or len(keyspace) == 0
 
-        def kde_series(target):
+        def hist(target):
             if len(target) == 0:
                 # The case of no data.
-                return [EMPTY_HIST_VALUE_FILL for x in range(len(HISTOGRAM_POSITIONS))]
+                return [EMPTY_HIST_VALUE_FILL for x in range(hist_length)]
 
             if target.nunique() == 1:
                 # The case of only 1 unique value.
-                return [UNIQUE_HIST_VALUE_FILL for x in range(len(HISTOGRAM_POSITIONS))]
+                return [UNIQUE_HIST_VALUE_FILL for x in range(hist_length)]
 
-            kernel = stats.gaussian_kde(data[key])
-            return kernel(HISTOGRAM_POSITIONS)
+            hist, edges = np.histogram(data[key], bins=hist_length, density=True)
+            return hist
 
         dists = {k: [] for (k, _, _) in MODEL_WORKLOAD_HIST_INPUTS}
         if len(keyspace) > 0:
@@ -292,13 +323,13 @@ class WorkloadModel:
 
             # Construct distribution for the general data.
             for key in keyspace:
-                dists["data"].append(kde_series(data[key]))
+                dists["data"].append(hist(data[key]))
 
             op = ["SELECT", "INSERT", "UPDATE", "DELETE"]
             for opcode in op:
                 query_slice = queries[queries.OP == opcode]
                 for key in keyspace:
-                    output = kde_series(query_slice[key])
+                    output = hist(query_slice[key])
                     dists[opcode.lower()].append(output)
 
         if isinstance(table_data, dict):
