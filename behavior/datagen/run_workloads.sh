@@ -262,9 +262,9 @@ for workload in "${workload_directory}"/*; do
                 fi
             fi
 
+            postmaster_pid=$(pidof postgres | xargs -n1 | sort | head -n1)
             if [ ! -z "$taskset_postgres" ] && [ "$taskset_postgres" != 'None' ];
             then
-                postmaster_pid=$(pidof postgres | xargs -n1 | sort | head -n1)
                 taskset -pc $taskset_postgres $postmaster_pid
             fi
 
@@ -272,7 +272,7 @@ for workload in "${workload_directory}"/*; do
             then
                 # Initialize collector. We currently don't have a means by which to check whether
                 # collector has successfully attached to the instance. As such, we (wait) 10 seconds.
-                doit collector_init --benchmark="${benchmark}" --output_dir="${benchmark_output}" --wait_time=10 --collector_interval=30
+                doit collector_init --benchmark="${benchmark}" --output_dir="${benchmark_output}" --wait_time=10 --collector_interval=30 --pid=$postmaster_pid
             fi
 
             # Execute the benchmark
@@ -281,7 +281,7 @@ for workload in "${workload_directory}"/*; do
             if [ "$enable_collector" != 'False' ];
             then
                 # Shutdown collector.
-                doit collector_shutdown
+                doit collector_shutdown --output_dir="${benchmark_output}"
             fi
 
             if [ ${i} == $((${#benchbase_configs[@]} - 1)) ];
