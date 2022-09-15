@@ -10,7 +10,6 @@ from behavior.model_ous.process import (
     DIFF_PLAN_NODE_ID_SCHEMA_INDEX,
     DIFF_LEFT_CHILD_PLAN_NODE_ID_SCHEMA_INDEX,
     DIFF_RIGHT_CHILD_PLAN_NODE_ID_SCHEMA_INDEX,
-    DIFF_ELAPSED_US_SCHEMA_INDEX,
     DIFF_TARGET_START_SCHEMA_INDEX,
     DiffPlanIncompleteSubinvocationException,
     DiffPlanInvalidDataException,
@@ -45,7 +44,6 @@ def diff_query_tree(np.ndarray[FTYPE_t, ndim=2] matrix):
     cdef int left_id = DIFF_LEFT_CHILD_PLAN_NODE_ID_SCHEMA_INDEX
     cdef int right_id = DIFF_RIGHT_CHILD_PLAN_NODE_ID_SCHEMA_INDEX
     cdef int target = DIFF_TARGET_START_SCHEMA_INDEX
-    cdef int elapsed_us = DIFF_ELAPSED_US_SCHEMA_INDEX
 
     # Define a 1 dimensional array that has the same length as the number of rows.
     # offset is used to build a mapping offset[i] = Y such that plan node ID [i]

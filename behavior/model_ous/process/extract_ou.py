@@ -13,7 +13,7 @@ from pandas import DataFrame
 from plumbum import cli
 from tqdm import tqdm
 
-from behavior import DERIVED_FEATURES_MAP
+from behavior import EXECUTION_FEATURES_MAP
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +27,7 @@ def transform_ou_df(node_name, ou_df):
     be a point to perform certain transformations.
     """
     derived_map = {}
-    for k, v in DERIVED_FEATURES_MAP.items():
+    for k, v in EXECUTION_FEATURES_MAP.items():
         if k.startswith(node_name):
             derived_map[v] = k
 

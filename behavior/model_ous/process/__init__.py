@@ -60,14 +60,14 @@ DIFF_SCHEMA_METADATA = ["ou_index", "data_id"] + UNIQUE_QUERY_ID_INDEX + [
     ]
 
 # DIFF_SCHEMA_METADATA with all the target columns that need to be differenced.
-DIFF_SCHEMA_WITH_TARGETS = DIFF_SCHEMA_METADATA + ["total_cost", "startup_cost"] + TARGET_COLUMNS
+# We need to difference block counts because those are tracked holistically by postgres.
+DIFF_SCHEMA_WITH_TARGETS = DIFF_SCHEMA_METADATA + ["total_cost", "startup_cost", "blk_hit", "blk_miss", "blk_dirty", "blk_write"] + TARGET_COLUMNS
 
 # Given a 2D DataFrame following the DIFFERENCING_SCHEMA, these give the column offsets of the plan node,
 # the left child plan node, the right child plan node, and where the target columns begin.
 DIFF_PLAN_NODE_ID_SCHEMA_INDEX = DIFF_SCHEMA_WITH_TARGETS.index("plan_node_id")
 DIFF_LEFT_CHILD_PLAN_NODE_ID_SCHEMA_INDEX = DIFF_SCHEMA_WITH_TARGETS.index("left_child_node_id")
 DIFF_RIGHT_CHILD_PLAN_NODE_ID_SCHEMA_INDEX = DIFF_SCHEMA_WITH_TARGETS.index("right_child_node_id")
-DIFF_ELAPSED_US_SCHEMA_INDEX = DIFF_SCHEMA_WITH_TARGETS.index("elapsed_us")
 DIFF_TARGET_START_SCHEMA_INDEX = DIFF_SCHEMA_WITH_TARGETS.index("total_cost")
 
 

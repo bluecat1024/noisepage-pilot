@@ -306,8 +306,9 @@ def generate_txn_plots(query_stream, output_dir, txn_analysis_file):
         plt.close()
 
         fig, axes = plt.subplots(1, 1, figsize=(12.8, 7.2))
-        df.txn_elapsed_us.hist(cumulative=True, density=True, histtype='step', bins=100, ax=axes, color='r', alpha=0.5)
-        df.txn_pred_elapsed_us.hist(cumulative=True, density=True, histtype='step', bins=100, ax=axes, color='b', alpha=0.5)
+        df.txn_elapsed_us.hist(cumulative=True, density=True, histtype='step', bins=100, ax=axes, color='r', alpha=0.5, label="True Dist")
+        df.txn_pred_elapsed_us.hist(cumulative=True, density=True, histtype='step', bins=100, ax=axes, color='b', alpha=0.5, label="Predicted Dist")
+        axes.legend(["True Dist", "Predicted Dist"])
         plt.savefig(output_dir / f"{txn_name}_cdf.png")
         plt.close()
 
@@ -337,7 +338,7 @@ def main(dir_input, txn_analysis_file, generate_summary, generate_holistic, gene
                 slots = ff_tbl_change_map[list(ff_tbl_change_map.keys())[0]]
 
                 for i, (ts, _) in enumerate(slots):
-                    consider_streams.append((f"{i}", query_stream[query_stream.statement_timestamp < ts]))
+                    consider_streams.append((f"{i}", query_stream[query_stream.statement_timestamp < ts].copy()))
                     query_stream = query_stream[query_stream.statement_timestamp >= ts]
 
                 if query_stream.shape[0] > 0:

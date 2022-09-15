@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import logging
 import os
 import shutil
@@ -265,9 +266,18 @@ def main(data_dir, output_dir, experiment, output_ous) -> None:
         unified_replace.drop(labels=labels_replace, axis=1, inplace=True)
         unified.drop(labels=[col for col in unified.columns if col not in labels_replace], axis=1, inplace=True)
         unified = unified_replace.join(unified, how="inner")
+        del unified_np
+        del unified_replace
+        del diffed_matrices
+        gc.collect()
+        gc.collect()
 
         # Write the results out to the output directory.
         save_results(diff_data_dir, features, unified, output_ous, extra_files)
+        del unified
+        del features
+        gc.collect()
+        gc.collect()
 
 
 class DiffCLI(cli.Application):

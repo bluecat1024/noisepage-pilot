@@ -123,10 +123,14 @@ class BehaviorModel:
         self.features = features
         self.normalize = config["normalize"]
         self.log_transform = config["log_transform"]
+        self.robust = config["robust"]
         self.eps = 1e-4
         self.xscaler = RobustScaler() if config["robust"] else StandardScaler()
         self.yscaler = RobustScaler() if config["robust"] else StandardScaler()
         self.targets = targets
+
+    def support_incremental(self):
+        return "gbm" in self.method
 
     def train(self, x, y):
         """Train a model using the input features and targets.
@@ -141,12 +145,18 @@ class BehaviorModel:
         if self.log_transform:
             x = np.log(x + self.eps)
             y = np.log(y + self.eps)
+            assert np.sum(x.isna()) == 0
+            assert np.sum(y.isna()) == 0
 
         if self.normalize:
             x = self.xscaler.fit_transform(x)
             y = self.yscaler.fit_transform(y)
 
-        self.model.fit(x, y)
+        if self.support_incremental():
+            # Allow for continuous fit.
+            self.model.fit(x, y, init_model=self.model)
+        else:
+            self.model.fit(x, y)
 
 
     def predict(self, x):
@@ -162,6 +172,10 @@ class BehaviorModel:
         NDArray[np.float32]
             Predicted targets.
         """
+        # Extract only the relevant features. Good thing is this will complain
+        # if a feature is not found.
+        x = x[self.features]
+
         # Transform the features.
         if self.log_transform:
             x = np.log(x + self.eps)
@@ -193,3 +207,12 @@ class BehaviorModel:
         """
         with open(output_path / f"{self.ou_name}.pkl", "wb") as f:
             pickle.dump(self, f)
+
+        with open(output_path / f"{self.ou_name}_info.txt", "w") as f:
+            feature_list = ",".join(self.features)
+            target_list = ",".join(self.targets)
+            f.write(f"features: {feature_list}\n")
+            f.write(f"targets: {target_list}\n")
+            f.write(f"normalize: {self.normalize}\n")
+            f.write(f"log_transform: {self.log_transform}\n")
+            f.write(f"robust: {self.robust}\n")

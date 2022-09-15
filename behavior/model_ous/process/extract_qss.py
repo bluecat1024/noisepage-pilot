@@ -12,7 +12,7 @@ from pandas import DataFrame
 from plumbum import cli
 from tqdm import tqdm
 
-from behavior import OperatingUnit, TARGET_COLUMNS, DERIVED_FEATURES_MAP
+from behavior import OperatingUnit, TARGET_COLUMNS
 from behavior.model_ous.process import PLAN_INDEPENDENT_ID, UNIQUE_QUERY_ID_INDEX, QSS_PLANS_IGNORE_NODE_FEATURES, QSS_MERGE_PLAN_KEY
 
 logger = logging.getLogger(__name__)
@@ -156,7 +156,7 @@ def merge_ou_with_features(ou_df, plans_df, new_plan_features):
 
     # Normalize ou_df.
     ou_df.reset_index(drop=True, inplace=True)
-    ou_df.drop(labels=["plan_feature_idx"], axis=1, inplace=True)
+    ou_df.drop(labels=["plan_feature_idx", "generation"], axis=1, inplace=True)
     return ou_df
 
 

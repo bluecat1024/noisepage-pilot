@@ -1,4 +1,5 @@
 from __future__ import annotations
+from behavior.datagen.pg_collector_utils import KNOBS
 from enum import Enum
 
 # A mapping from supported benchmark to tables used in the benchmark. This mapping is primarily
@@ -152,7 +153,7 @@ A dictionary of derived features. The name is the name of the derived feature th
 [OU]_[feature]. OU is guaranteed to be an unique identifier. The value of the derived feature is the
 column in pg_qss_stats that should be remapped.
 """
-DERIVED_FEATURES_MAP = {
+EXECUTION_FEATURES_MAP = {
     "DestReceiverRemote_num_output": "counter0",
     "IndexOnlyScan_num_iterator_used": "counter0",
     "IndexOnlyScan_num_heap_fetches": "counter1",
@@ -205,9 +206,22 @@ DERIVED_FEATURES_MAP = {
     "BitmapHeapScan_num_empty_tuples": "counter1",
     "BitmapHeapScan_num_tuples_fetch": "counter2",
     "BitmapHeapScan_num_blocks_prefetch": "counter3",
-
-    "blk_hit": "blk_hit",
-    "blk_miss": "blk_miss",
-    "blk_dirty": "blk_dirty",
-    "blk_write": "blk_write",
 }
+
+
+"""
+This describes the map of derived input features to the models.
+It is assumed that the key maps directly to the value.
+"""
+DERIVED_FEATURES_MAP = {k: k for k in EXECUTION_FEATURES_MAP}
+DERIVED_FEATURES_MAP.update({"total_cost": "total_cost", "startup_cost": "startup_cost"})
+
+for ou in OperatingUnit:
+    # Generate per-OU switches for the KNOBs and the block stats.
+    feats = ["blk_hit", "blk_miss", "blk_dirty", "blk_write"] + list(KNOBS.keys())
+    DERIVED_FEATURES_MAP.update({ou.name + "_" + feat: feat for feat in feats})
+
+    feats = ["total_cost", "startup_cost"]
+    DERIVED_FEATURES_MAP.update({feat + "_" + ou.name: feat for feat in feats})
+
+# Add all the KNOBS

@@ -15,6 +15,7 @@ TRAILING_BLOCKED_FEATURES = DIFF_SCHEMA_METADATA + [
     "unix_timestamp",
     "relname",
     "relkind",
+    "generation",
 ]
 
 

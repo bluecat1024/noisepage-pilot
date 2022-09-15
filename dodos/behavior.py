@@ -263,18 +263,21 @@ def task_behavior_train():
     Behavior modeling: train OU models.
     """
 
-    def train_cmd(use_featurewiz, config_file, train_data, prefix_allow_derived_features):
+    def train_cmd(config_file, train_data, prefix_allow_derived_features, robust, log_transform):
         train_args = (
             f"--config-file {config_file} "
             f"--dir-data {train_data} "
             f"--dir-output {ARTIFACT_MODELS} "
         )
 
+        if robust is not None:
+            train_args = train_args + "--robust "
+
+        if log_transform is not None:
+            train_args = train_args + "--log-transform "
+
         if prefix_allow_derived_features != "":
             train_args = train_args + f"--prefix-allow-derived-features {prefix_allow_derived_features} "
-
-        if use_featurewiz == "True":
-            train_args = train_args + "--use-featurewiz "
 
         return f"python3 -m behavior train {train_args}"
 
@@ -284,12 +287,6 @@ def task_behavior_train():
         "verbosity": VERBOSITY_DEFAULT,
         "uptodate": [False],
         "params": [
-            {
-                "name": "use_featurewiz",
-                "long": "use_featurewiz",
-                "help": "Whether to use featurewiz for feature selection.",
-                "default": False,
-            },
             {
                 "name": "config_file",
                 "long": "config_file",
@@ -308,6 +305,18 @@ def task_behavior_train():
                 "help": "List of prefixes to use for selecting derived features for training the model.",
                 "default": "",
             },
+            {
+                "name": "robust",
+                "long": "robust",
+                "help": "Whether to use the robust scaler to normalize to the data.",
+                "default": None,
+            },
+            {
+                "name": "log_transform",
+                "long": "log_transform",
+                "help": "Whether to use the log_transform to the data.",
+                "default": None,
+            },
         ],
     }
 
@@ -316,7 +325,7 @@ def task_behavior_eval_ou():
     """
     Behavior modeling: eval OU models.
     """
-    def eval_cmd(eval_data, skip_generate_plots, models, methods):
+    def eval_cmd(eval_data, skip_generate_plots, models, methods, output_name):
         if models is None:
             # Find the latest experiment by last modified timestamp.
             experiment_list = sorted((exp_path for exp_path in ARTIFACT_MODELS.glob("*")), key=os.path.getmtime)
@@ -325,10 +334,16 @@ def task_behavior_eval_ou():
         else:
             assert os.path.isdir(models), f"Specified path {models} is not a valid directory."
 
+        assert Path(eval_data).exists(), f"Specified OU {eval_data} does not exist."
+
+        if output_name is None:
+            eval_timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            output_name = f"eval_{eval_timestamp}"
+
         eval_args = (
             f"--dir-data {eval_data} "
             f"--dir-models {models} "
-            f"--dir-evals-output {ARTIFACT_EVALS_OU} "
+            f"--dir-evals-output {ARTIFACT_EVALS_OU}/{output_name} "
         )
 
         if methods is not None:
@@ -369,7 +384,13 @@ def task_behavior_eval_ou():
                 "long": "methods",
                 "help": "Comma separated methods that should be evaluated. Defaults to None (all).",
                 "default": None,
-            }
+            },
+            {
+                "name": "output_name",
+                "long": "output_name",
+                "help": "Name of the output directory.",
+                "default": None,
+            },
         ],
     }
 

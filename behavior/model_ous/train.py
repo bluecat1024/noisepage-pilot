@@ -17,18 +17,21 @@ from plumbum import cli
 from sklearn import tree
 
 from behavior import TARGET_COLUMNS, OperatingUnit, Targets, DERIVED_FEATURES_MAP
-from behavior.feature_selection import featurize
 from behavior.utils.prepare_ou_data import load_input_data
 from behavior.utils.evaluate_ou import evaluate_ou_model
 from behavior.model_ous.model import BehaviorModel
 
 logger = logging.getLogger(__name__)
 
-IGNORE_COLS = [
-    # Ignore all columns that are identifying information.
-    "data_identifier",
-    "source_file",
-]
+
+def contains_data(train_files, ou):
+    ou_results = [fp for fp in train_files if fp.name.startswith(ou.name)]
+    for ou_result in ou_results:
+        df = load_input_data(logger, ou_result, {}, True)
+        if df.shape[0] > 0:
+            return df
+
+    return None
 
 
 def load_data(train_files, ou):
@@ -71,8 +74,9 @@ def main(
     config_file,
     dir_data,
     dir_output,
-    use_featurewiz,
     prefix_allow_derived_features,
+    robust,
+    log_transform,
 ):
     # Load modeling configuration.
     if not config_file.exists():
@@ -82,20 +86,18 @@ def main(
     with config_file.open("r") as f:
         config = yaml.load(f, Loader=yaml.FullLoader)["modeling"]
 
-    # Block derived features
-    prefix_allows = prefix_allow_derived_features.split(",")
-    for n in DERIVED_FEATURES_MAP.keys():
-        allow = False
-        for prefix_allow in prefix_allows:
-            if n.startswith(prefix_allow):
-                allow = True
+    if robust:
+        config["robust"] = True
 
-        if not allow:
-            IGNORE_COLS.append(n)
+    if log_transform:
+        config["log_transform"] = True
+
+    prefix_allows = prefix_allow_derived_features.split(",")
 
     # Mark this training-evaluation run with a timestamp for identification.
     training_timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     train_files = list(dir_data.rglob("*.feather"))
+    train_paths = [fp for fp in train_files if os.stat(fp).st_size > 0]
     assert len(train_files) > 0, "No matching data files for training could be found."
 
     # Load the data and name the model.
@@ -106,44 +108,47 @@ def main(
 
     for ou in OperatingUnit:
         ou_name = ou.name
-        df_train = load_data(train_files, ou)
-        if df_train is None:
+        ou_results = [fp for fp in train_files if fp.name.startswith(ou_name)]
+
+        # Block derived features
+        ignore_cols = [ "data_identifier", "source_file", ]
+        relevant_features = {k: v for k, v in DERIVED_FEATURES_MAP.items() if k.startswith(ou_name + "_") or k.endswith("_" + ou_name)}
+        for n, v in relevant_features.items():
+            allow = False
+            for prefix_allow in prefix_allows:
+                if n.startswith(prefix_allow):
+                    allow = True
+
+            if not allow:
+                ignore_cols.append(v)
+
+        # See if there is any data.
+        df_train = contains_data(ou_results, ou)
+        if df_train is None or df_train.shape[0] == 0:
             continue
 
-        logger.info("Begin Training OU: %s", ou_name)
-        logger.info("Deriving input features for OU: %s", ou_name)
-        targets = [Targets.ELAPSED_US.value]
-        if use_featurewiz:
-            # TODO(wz2): Currently prioritize the `elapsed_us` target. We may want to specify multiple
-            # targets in the future and/or consider training a model for each target separately.
-            features = featurize.derive_input_features(
-                df_train,
-                feature_engg=None,
-                ignore=IGNORE_COLS,
-                test=None,
-                targets=targets,
-                config=config["featurize"]
-            )
-        else:
-            # Get a metadata representation for extracting all feature columns.
-            features = featurize.extract_all_features(df_train, ignore=IGNORE_COLS)
-
-        # Partition the features and targets.
-        x_train = featurize.extract_input_features(df_train, features)
-        y_train = df_train[targets].values
+        # Get a metadata representation for extracting all feature columns.
+        features = list(set(df_train.columns) - set(TARGET_COLUMNS) - set(ignore_cols))
         del df_train
         gc.collect()
 
-        # Check if no valid training data was found (for the current operating unit).
-        if x_train.shape[1] == 0 or y_train.shape[1] == 0:
-            logger.warning(
-                "OU: %s has no valid training data, skipping. Feature cols: %s, X_train shape: %s, y_train shape: %s",
-                ou_name,
-                features,
-                x_train.shape,
-                y_train.shape,
-            )
-            continue
+        def get_data(files, ou):
+            df_train = load_data(files, ou)
+            if df_train is None:
+                return None, None
+
+            # Partition the features and targets.
+            x_train = df_train[features]
+            y_train = df_train[targets].values
+            del df_train
+            gc.collect()
+
+            assert x_train.shape[1] != 0 and y_train.shape[1] != 0
+            return x_train, y_train
+
+        targets = [Targets.ELAPSED_US.value]
+        logger.info("Begin Training OU: %s", ou_name)
+        logger.info("Derived input features for OU: %s (%s)", ou_name, features)
 
         # Train one model for each method specified in the modeling configuration.
         for method in config["methods"]:
@@ -156,12 +161,32 @@ def main(
                 targets=targets,
             )
 
-            # Train and save the model.
+            if ou_model.support_incremental():
+                for file in ou_results:
+                    x_train, y_train = get_data([file], ou)
+                    if x_train is None:
+                        continue
+
+                    logger.info("Partially training with %s", file)
+                    ou_model.train(x_train, y_train)
+                    del x_train
+                    del y_train
+            else:
+                x_train, y_train = get_data(train_files, ou)
+                if x_train is None:
+                    # Skip this method.
+                    continue
+
+                # Train the model.
+                ou_model.train(x_train, y_train)
+                del x_train
+                del y_train
+
+            # Save the model.
             output = output_dir / method
             output.mkdir(parents=True, exist_ok=True)
-
-            ou_model.train(x_train, y_train)
             ou_model.save(output)
+
             del ou_model
 
         gc.collect()
@@ -186,14 +211,20 @@ class TrainCLI(cli.Application):
         mandatory=True,
         help="Folder to output models to.",
     )
-    use_featurewiz = cli.Flag(
-        "--use-featurewiz",
-        help="Whether to use featurewiz for feature selection.",
-    )
     prefix_allow_derived_features = cli.SwitchAttr(
         "--prefix-allow-derived-features",
         help="List of prefixes to use for selecting derived features for training the model.",
         default=""
+    )
+    robust = cli.Flag(
+        "--robust",
+        default=False,
+        help="Whether to force the robust scalar to the model.",
+    )
+    log_transform = cli.Flag(
+        "--log-transform",
+        default=False,
+        help="Whether to force the log transform to the input data.",
     )
 
     def main(self):
@@ -201,8 +232,9 @@ class TrainCLI(cli.Application):
             self.config_file,
             self.dir_data,
             self.dir_output,
-            self.use_featurewiz,
             self.prefix_allow_derived_features,
+            self.robust,
+            self.log_transform,
         )
 
 
