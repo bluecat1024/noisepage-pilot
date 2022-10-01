@@ -268,11 +268,17 @@ for workload in "${workload_directory}"/*; do
                 taskset -pc $taskset_postgres $postmaster_pid
             fi
 
+            if [ "$snapshot_metadata" == 'True' ];
+            then
+                ${psql} --dbname=benchbase --csv --command="SELECT EXTRACT(epoch from NOW()), * FROM pg_stats s JOIN information_schema.columns c ON s.tablename=c.table_name AND s.attname=c.column_name WHERE s.schemaname = 'public';" > "${benchmark_output}/pg_stats.csv.${i}"
+                ${psql} --dbname=benchbase --csv --command="SELECT EXTRACT(epoch from NOW()), * FROM pg_class t JOIN pg_namespace n ON n.oid = t.relnamespace WHERE n.nspname = 'public';" > "${benchmark_output}/pg_class.csv.${i}"
+            fi
+
             if [ "$enable_collector" != 'False' ];
             then
                 # Initialize collector. We currently don't have a means by which to check whether
                 # collector has successfully attached to the instance. As such, we (wait) 10 seconds.
-                doit collector_init --benchmark="${benchmark}" --output_dir="${benchmark_output}" --wait_time=10 --collector_interval=30 --pid=$postmaster_pid
+                doit collector_init --benchmark="${benchmark}" --output_dir="${benchmark_output}" --wait_time=60 --collector_interval=30 --pid=$postmaster_pid
             fi
 
             # Execute the benchmark
@@ -312,6 +318,12 @@ for workload in "${workload_directory}"/*; do
             if [ -d "${log}" ] && [ "${continuous}" != 'True' ];
             then
                 mv "${PGDATA_LOCATION}/log" "${benchmark_output}/log.${i}"
+            elif [ -d "${log}" ];
+            then
+                # Make and move the log files.
+                mkdir "${benchmark_output}/log.${i}"
+                mv ${PGDATA_LOCATION}/log/* "${benchmark_output}/log.${i}/"
+                ${psql} --dbname=benchbase --csv --command="SELECT * FROM pg_rotate_logfile()"
             fi
 
             # Similarly, we move the corresponding benchmark's execution log from BenchBase to the

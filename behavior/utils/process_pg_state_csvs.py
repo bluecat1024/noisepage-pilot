@@ -23,6 +23,7 @@ def process_time_pg_stats(time_pg_stats):
         # "most_common_elems",
         # "most_common_elem_freqs",
         # "elem_count_histogram",
+        # "data_type",
     ]
 
     cols_remove = [col for col in time_pg_stats.columns if col not in PG_STATS_SCHEMA]

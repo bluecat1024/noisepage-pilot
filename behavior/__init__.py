@@ -162,6 +162,8 @@ EXECUTION_FEATURES_MAP = {
     "IndexScan_num_heap_fetches": "counter1",
     "IndexScan_num_outer_loops": "counter2",
     "IndexScan_num_defrag": "counter3",
+    "SeqScan_num_iterator_used": "counter0",
+    "SeqScan_num_defrag": "counter1",
     "ModifyTableInsert_num_br_ir_as_triggers_fired": "counter0",
     "ModifyTableInsert_num_spec_insert": "counter1",
     "ModifyTableInsert_num_tuple_toast": "counter2",

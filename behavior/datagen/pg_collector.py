@@ -40,7 +40,7 @@ def lost_something(num_lost):
 
 # Name of output file/target --> (query, frequent)
 PG_COLLECTOR_TARGETS = {
-    "pg_stats": "SELECT EXTRACT(epoch from NOW())*1000000 as time, pg_stats.* FROM pg_stats WHERE schemaname = 'public';",
+    "pg_stats": "SELECT EXTRACT(epoch from NOW())*1000000 as time, s.*, c.data_type FROM pg_stats s JOIN information_schema.columns c ON s.tablename=c.table_name AND s.attname=c.column_name WHERE schemaname = 'public';",
     "pg_class": "SELECT EXTRACT(epoch from NOW())*1000000 as time, * FROM pg_class t JOIN pg_namespace n ON n.oid = t.relnamespace WHERE n.nspname = 'public';",
     "pg_index": "SELECT EXTRACT(epoch from NOW())*1000000 as time, * FROM pg_index;",
     "pg_attribute": "SELECT EXTRACT(epoch from NOW())*1000000 as time, * FROM pg_attribute;",
@@ -188,6 +188,10 @@ def collector(histograms, collector_flags, pid, socket_fd):
     cflags = ['-DKBUILD_MODNAME="collector"']
     collector_bpf = BPF(text=markers_c, usdt_contexts=[marker_probes], cflags=cflags)
     collector_bpf.attach_kprobe(event="finish_task_switch", fn_name="sched_switch")
+    collector_bpf.attach_kprobe(event="vfs_read", fn_name="trace_read_entry")
+    collector_bpf.attach_kretprobe(event="vfs_read", fn_name="trace_read_return")
+    collector_bpf.attach_kprobe(event="vfs_write", fn_name="trace_write_entry")
+    collector_bpf.attach_kretprobe(event="vfs_write", fn_name="trace_write_return")
 
     window_count = 0
     histogram = collector_bpf.get_table("dist")
@@ -211,7 +215,9 @@ def collector(histograms, collector_flags, pid, socket_fd):
                 histograms.append(hist)
                 window_count += 1
 
-            time.sleep(30)
+            # Try and get second level histogram resolutions.
+            # This way, we can build larger summaries.
+            time.sleep(1)
         except KeyboardInterrupt:
             logger.info("Collector for PID %s caught KeyboardInterrupt.", pid)
         except Exception as e:  # pylint: disable=broad-except

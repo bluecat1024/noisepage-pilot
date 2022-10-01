@@ -31,6 +31,8 @@ datagen:
     enable_collector: True
     # Whether to snapshot the data at the start right after LOAD.
     snapshot_data: False
+    # Whether snapshot metadata.
+    snapshot_metadata: False
     # Whether we want to taskset postgres. This provides the cpu-list argument.
     taskset_postgres: null
     # Whether we want to taskset benchbase. This provides the cpu-list argument.
