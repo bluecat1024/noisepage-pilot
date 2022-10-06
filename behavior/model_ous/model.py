@@ -130,7 +130,8 @@ class BehaviorModel:
         self.targets = targets
 
     def support_incremental(self):
-        return "gbm" in self.method
+        # Can't do incremental if normalizing inputs.
+        return "gbm" in self.method and not self.normalize
 
     def train(self, x, y):
         """Train a model using the input features and targets.
@@ -149,6 +150,7 @@ class BehaviorModel:
             assert np.sum(y.isna()) == 0
 
         if self.normalize:
+            # TODO(wz2): This partial_fitting technique for scalers is a little broken.
             x = self.xscaler.fit_transform(x)
             y = self.yscaler.fit_transform(y)
 

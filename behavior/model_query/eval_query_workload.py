@@ -25,14 +25,13 @@ from plumbum import cli
 from behavior import OperatingUnit, Targets, BENCHDB_TO_TABLES
 from behavior.datagen.pg_collector_utils import _parse_field, KNOBS
 from behavior.utils.evaluate_ou import evaluate_ou_model
-from behavior.utils.prepare_ou_data import purify_index_input_data
+from behavior.utils.prepare_ou_data import prepare_index_input_data
 from behavior.model_workload.utils import keyspace_metadata_read
 from behavior.utils.process_pg_state_csvs import (
     process_time_pg_stats,
     process_time_pg_attribute,
     process_time_pg_index,
     process_time_pg_class,
-    merge_modifytable_data,
     build_time_index_metadata
 )
 from behavior.model_workload.model import WorkloadModel, MODEL_WORKLOAD_TABLE_STATS_TARGETS, MODEL_WORKLOAD_TARGETS, NORM_RELATIVE_OPS
@@ -892,7 +891,7 @@ def attach_metadata_ous(conn, scratch_it):
                 data.rename(columns=remapper, inplace=True)
 
             # Purify the index data.
-            data = purify_index_input_data(data)
+            data = prepare_index_input_data(data)
             data.reset_index(drop=True, inplace=True)
             data.to_feather(scratch_it / f"AUG_{index_ou.name}.feather{Path(target_file).suffix}")
 

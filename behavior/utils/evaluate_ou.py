@@ -7,7 +7,7 @@ from enum import Enum, auto, unique
 import pandas as pd
 import numpy as np
 
-from behavior.utils.prepare_ou_data import load_input_data
+from behavior.utils.prepare_ou_data import OUDataLoader
 from sklearn.metrics import (
     mean_absolute_error,
     mean_absolute_percentage_error,
@@ -48,7 +48,8 @@ def evaluate_ou_model(model, output_dir, benchmark, eval_file=None, eval_df=None
 
     if eval_file is not None:
         # Load the input OU file that we want to evaluate.
-        input_data = load_input_data(None, eval_file, {}, False)
+        # Load the entire input in and do evaluation.
+        input_data = OUDataLoader(logger=None, ou_files=[eval_file], chunksize=None, train=False).get_next_data()
     else:
         input_data = eval_df
         eval_file = Path(model.ou_name)

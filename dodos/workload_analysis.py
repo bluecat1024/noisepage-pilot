@@ -22,10 +22,11 @@ BUILD_PATH = default_build_path()
 
 def task_workload_analyze():
     """
-    Workload Analysis: perform analysis of a workload
+    Workload Analysis: perform analysis of a workload and populate all data needed for further computation.
     """
-    def workload_analyze(benchmark, input_workload, workload_only, psycopg2_conn, slice_window):
+    def workload_analyze(benchmark, input_workload, workload_only, psycopg2_conn, work_prefix, load_raw, load_initial_data, load_exec_stats):
         assert input_workload is not None
+        assert work_prefix is not None
         assert len(benchmark.split(",")) == len(input_workload.split(","))
 
         for iw in input_workload.split(","):
@@ -38,8 +39,17 @@ def task_workload_analyze():
             f"--benchmark {benchmark} "
             f"--dir-workload-input {input_workload} "
             f"--workload-only {workload_only} "
-            f"--slice-window {slice_window} "
+            f"--work-prefix {work_prefix} "
         )
+
+        if load_raw is not None:
+            eval_args += "--load-raw "
+
+        if load_initial_data is not None:
+            eval_args += "--load-initial-data "
+
+        if load_exec_stats is not None:
+            eval_args += "--load-exec-stats "
 
         if psycopg2_conn is not None:
             eval_args = eval_args + f"--psycopg2-conn \"{psycopg2_conn}\" "
@@ -76,21 +86,40 @@ def task_workload_analyze():
                 "default": None,
             },
             {
-                "name": "slice_window",
-                "long": "slice_window",
-                "help": "Slice of the window that should be processed.",
+                "name": "work_prefix",
+                "long": "work_prefix",
+                "help": "Prefix to use for working with the database.",
+                "default": None,
+            },
+            {
+                "name": "load_raw",
+                "long": "load_raw",
+                "help": "Whether to load the raw data or not.",
+                "default": None,
+            },
+            {
+                "name": "load_initial_data",
+                "long": "load_initial_data",
+                "help": "Load the initial data.",
+                "default": None,
+            },
+            {
+                "name": "load_exec_stats",
+                "long": "load_exec_stats",
+                "help": "Whether to load the execution statistics or not.",
                 "default": None,
             },
         ],
     }
 
 
-def task_workload_populate_data():
+def task_workload_exec_feature_synthesis():
     """
-    Workload Analysis: populate missing parameters of a workload and infer execution characteristics (if needed).
+    Workload Analysis: collect the input feature data for training exec feature model.
     """
-    def workload_populate_data(input_workload, workload_only, psycopg2_conn, slice_window, skip_save_frames):
+    def workload_exec_feature_synthesis(input_workload, workload_only, psycopg2_conn, work_prefix, buckets, slice_window, gen_exec_features, gen_data_page_features, gen_concurrency_features):
         assert input_workload is not None
+        assert work_prefix is not None
 
         for iw in input_workload.split(","):
             assert Path(iw).exists(), f"{iw} is not valid path."
@@ -98,19 +127,25 @@ def task_workload_populate_data():
         eval_args = (
             f"--dir-workload-input {input_workload} "
             f"--workload-only {workload_only} "
+            f"--work-prefix {work_prefix} "
+            f"--buckets {buckets} "
             f"--slice-window {slice_window} "
         )
 
-        if skip_save_frames is not None:
-            eval_args += f"--skip-save-frames {skip_save_frames} "
+        if gen_exec_features is not None:
+            eval_args += "--gen-exec-features "
+        if gen_data_page_features is not None:
+            eval_args += "--gen-data-page-features "
+        if gen_concurrency_features is not None:
+            eval_args += "--gen-concurrency-features "
 
         if psycopg2_conn is not None:
             eval_args = eval_args + f"--psycopg2-conn \"{psycopg2_conn}\" "
 
-        return f"python3 -m behavior workload_populate_data {eval_args}"
+        return f"python3 -m behavior workload_exec_feature_synthesis {eval_args}"
 
     return {
-        "actions": [CmdAction(workload_populate_data, buffering=1),],
+        "actions": [CmdAction(workload_exec_feature_synthesis, buffering=1),],
         "uptodate": [False],
         "verbosity": VERBOSITY_DEFAULT,
         "params": [
@@ -133,85 +168,40 @@ def task_workload_populate_data():
                 "default": None,
             },
             {
+                "name": "work_prefix",
+                "long": "work_prefix",
+                "help": "Prefix to use for working with the database.",
+                "default": None,
+            },
+            {
+                "name": "buckets",
+                "long": "buckets",
+                "help": "Number of buckets to use for bucketizing input data.",
+                "default": 10,
+            },
+            {
                 "name": "slice_window",
                 "long": "slice_window",
-                "help": "Slice of the window that should be processed.",
+                "help": "Slice window to use.",
+                "default": "10000",
+            },
+            {
+                "name": "gen_exec_features",
+                "long": "gen_exec_features",
+                "help": "Whether to generate exec features data.",
                 "default": None,
             },
             {
-                "name": "skip_save_frames",
-                "long": "skip_save_frames",
-                "help": "Whether to save intermediate data frames or not.",
-                "default": None,
-            },
-        ],
-    }
-
-
-def task_workload_windowize():
-    """
-    Workload Analysis: construct workload windows based on sampling.
-    """
-    def windowize(input_workload):
-        assert input_workload is not None
-
-        for iw in input_workload.split(","):
-            assert Path(iw).exists(), f"{iw} is not valid path."
-
-        eval_args = (
-            f"--dir-workload-input {input_workload} "
-        )
-
-        return f"python3 -m behavior workload_windowize {eval_args}"
-
-    return {
-        "actions": [CmdAction(windowize, buffering=1),],
-        "uptodate": [False],
-        "verbosity": VERBOSITY_DEFAULT,
-        "params": [
-            {
-                "name": "input_workload",
-                "long": "input_workload",
-                "help": "Path to the input workload that should be analyzed.",
-                "default": None,
-            },
-        ],
-    }
-
-
-def task_workload_prepare_train():
-    """
-    Workload Analysis: construct training data from windows.
-    """
-    def prepare_train(input_workload, hist_length):
-        assert input_workload is not None
-
-        for iw in input_workload.split(","):
-            assert Path(iw).exists(), f"{iw} is not valid path."
-
-        eval_args = (
-            f"--dir-workload-input {input_workload} "
-            f"--hist-length {hist_length} "
-        )
-
-        return f"python3 -m behavior workload_prepare_train {eval_args}"
-
-    return {
-        "actions": [CmdAction(prepare_train, buffering=1),],
-        "uptodate": [False],
-        "verbosity": VERBOSITY_DEFAULT,
-        "params": [
-            {
-                "name": "input_workload",
-                "long": "input_workload",
-                "help": "Path to the input workload that should be analyzed.",
+                "name": "gen_data_page_features",
+                "long": "gen_data_page_features",
+                "help": "Whether to generate data page features.",
                 "default": None,
             },
             {
-                "name": "hist_length",
-                "long": "hist_length",
-                "help": "Length of histogram featurization to use.",
-                "default": 10,
+                "name": "gen_concurrency_features",
+                "long": "gen_concurrency_features",
+                "help": "Whether to generate concurrency features.",
+                "default": None,
             },
         ],
     }

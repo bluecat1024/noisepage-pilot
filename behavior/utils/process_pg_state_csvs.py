@@ -6,85 +6,119 @@ def postgres_julian_to_unix(df):
     return (df / float(1e6)) + 86400 * (2451545 - 2440588)
 
 
-def process_time_pg_stats(time_pg_stats):
-    PG_STATS_SCHEMA = [
-        "time",
-        "schemaname",
-        "tablename",
-        "attname",
-        # "inherited",
-        "null_frac",
-        "avg_width",
-        "n_distinct",
-        "most_common_vals",
-        "most_common_freqs",
-        "histogram_bounds",
-        "correlation",
-        # "most_common_elems",
-        # "most_common_elem_freqs",
-        # "elem_count_histogram",
-        # "data_type",
-    ]
+PG_STATS_SCHEMA = [
+    "tablename",
+    "attname",
+    # "inherited",
+    "null_frac",
+    "avg_width",
+    "n_distinct",
+    # "most_common_vals",
+    # "most_common_freqs",
+    # "histogram_bounds",
+    "correlation",
+    # "most_common_elems",
+    # "most_common_elem_freqs",
+    # "elem_count_histogram",
+]
 
+
+def process_time_pg_stats(time_pg_stats):
     cols_remove = [col for col in time_pg_stats.columns if col not in PG_STATS_SCHEMA]
-    time_pg_stats.drop(labels=cols_remove, axis=1, inplace=True, errors='ignore')
 
     public_mask = (time_pg_stats.schemaname != 'public')
     time_pg_stats.drop(time_pg_stats[public_mask].index, axis=0, inplace=True)
-    time_pg_stats.drop(labels=["schemaname"], axis=1, inplace=True, errors='ignore')
     time_pg_stats["unix_timestamp"] = time_pg_stats.time.astype(float) / 1e6
+
+    time_pg_stats.drop(labels=cols_remove, axis=1, inplace=True, errors='ignore')
     time_pg_stats.reset_index(drop=True, inplace=True)
     time_pg_stats["pg_stats_identifier"] = time_pg_stats.index
     return time_pg_stats
 
 
-def process_time_pg_class(time_pg_class):
-    PG_CLASS_SCHEMA = [
-        "time",
-        "oid",
-        "relname",
-        # "relnamespace",
-        # "reltype",
-        # "reloftype",
-        # "relowner",
-        # "relam",
-        # "relfilenode",
-        # "reltablespace",
-        "relpages",
-        "reltuples",
-        "relallvisible",
-        "reltoastrelid",
-        # "relhasindex",
-        # "relisshared",
-        # "relpersistence",
-        "relkind",
-        "relnatts",
-        # "relchecks",
-        # "relhasrules",
-        # "relrelhastriggers",
-        # "relhassubclass",
-        # "relrowsecurity",
-        # "relforcerowsecurity",
-        # "relispopulated",
-        # "relreplident",
-        # "relispartition",
-        # "relrewrite",
-        # "relfroxzenxid",
-        # "relminmxid",
-        # "relacl",
-        # "reloptions",
-        # "relpartbound",
-    ]
+PG_CLASS_SCHEMA = [
+    "oid",
+    "relname",
+    # "relnamespace",
+    # "reltype",
+    # "reloftype",
+    # "relowner",
+    # "relam",
+    # "relfilenode",
+    # "reltablespace",
+    "relpages",
+    "reltuples",
+    "relallvisible",
+    "reltoastrelid",
+    # "relhasindex",
+    # "relisshared",
+    # "relpersistence",
+    "relkind",
+    "relnatts",
+    # "relchecks",
+    # "relhasrules",
+    # "relrelhastriggers",
+    # "relhassubclass",
+    # "relrowsecurity",
+    # "relforcerowsecurity",
+    # "relispopulated",
+    # "relreplident",
+    # "relispartition",
+    # "relrewrite",
+    # "relfroxzenxid",
+    # "relminmxid",
+    # "relacl",
+    # "reloptions",
+    # "relpartbound",
+]
 
+
+PG_CLASS_INDEX_SCHEMA = [
+    "oid",
+    "relname",
+    # "relnamespace",
+    # "reltype",
+    # "reloftype",
+    # "relowner",
+    # "relam",
+    # "relfilenode",
+    # "reltablespace",
+    "relpages",
+    "reltuples",
+    # "relallvisible",
+    # "reltoastrelid",
+    # "relhasindex",
+    # "relisshared",
+    # "relpersistence",
+    # "relkind",
+    "relnatts",
+    # "relchecks",
+    # "relhasrules",
+    # "relrelhastriggers",
+    # "relhassubclass",
+    # "relrowsecurity",
+    # "relforcerowsecurity",
+    # "relispopulated",
+    # "relreplident",
+    # "relispartition",
+    # "relrewrite",
+    # "relfroxzenxid",
+    # "relminmxid",
+    # "relacl",
+    # "reloptions",
+    # "relpartbound",
+]
+
+
+def process_time_pg_class(time_pg_class):
     cols_remove = [col for col in time_pg_class.columns if col not in PG_CLASS_SCHEMA]
-    time_pg_class = time_pg_class.drop(labels=cols_remove, axis=1, errors='ignore')
     time_pg_class["unix_timestamp"] = time_pg_class.time.astype(float) / 1e6
+    time_pg_class = time_pg_class.drop(labels=cols_remove, axis=1, errors='ignore')
     time_pg_class.reset_index(drop=True, inplace=True)
-    time_pg_class.drop(labels=["time"], axis=1, inplace=True, errors='ignore')
 
     tables = time_pg_class[(time_pg_class.relkind == 'r') | (time_pg_class.relkind == 't')]
     indexes = time_pg_class[time_pg_class.relkind == 'i']
-    indexes = indexes.drop(labels=["relallvisible", "reltoastrelid", "relkind"], axis=1, errors='ignore')
+    indexes = indexes[["unix_timestamp"] + PG_CLASS_INDEX_SCHEMA].copy()
 
     tables.reset_index(drop=True, inplace=True)
     indexes.reset_index(drop=True, inplace=True)
@@ -118,66 +152,68 @@ def merge_modifytable_data(name=None, root=None, data=None, pg_class=None, proce
     return time_data
 
 
-def process_time_pg_attribute(time_pg_attribute):
-    PG_ATTRIBUTE_SCHEMA = [
-        "attrelid",
-        "attname",
-        "atttypid",
-        # "attstattarget",
-        "attlen",
-        "attnum",
-        # "attndims",
-        # "attcacheoff",
-        "atttypmod",
-        # "attbyval",
-        # "attalign",
-        "attstorage",
-        "attcompression",
-        "attnotnull",
-        # "atthasdef",
-        # "atthasmissing",
-        # "attidentity",
-        # "attgenerated",
-        "attisdropped",
-        # "attislocal",
-        # "attinhcount",
-        # "attcollation",
-        # "attacl",
-        # "attoptions",
-        # "attfdwoptions",
-        # "attmissingval",
-    ]
+PG_ATTRIBUTE_SCHEMA = [
+    "attrelid",
+    "attname",
+    # "atttypid",
+    # "attstattarget",
+    "attlen",
+    "attnum",
+    # "attndims",
+    # "attcacheoff",
+    "atttypmod",
+    # "attbyval",
+    # "attalign",
+    # "attstorage",
+    # "attcompression",
+    # "attnotnull",
+    # "atthasdef",
+    # "atthasmissing",
+    # "attidentity",
+    # "attgenerated",
+    # "attisdropped",
+    # "attislocal",
+    # "attinhcount",
+    # "attcollation",
+    # "attacl",
+    # "attoptions",
+    # "attfdwoptions",
+    # "attmissingval",
+]
 
+
+def process_time_pg_attribute(time_pg_attribute):
     cols_remove = [col for col in time_pg_attribute.columns if col not in PG_ATTRIBUTE_SCHEMA]
     time_pg_attribute["unix_timestamp"] = time_pg_attribute.time.astype(float) / 1e6
     time_pg_attribute.drop(labels=cols_remove, axis=1, inplace=True, errors='ignore')
     return time_pg_attribute
 
 
-def process_time_pg_index(time_pg_index):
-    PG_INDEX_SCHEMA = [
-        "indexrelid",
-        "indrelid",
-        "indnatts",
-        "indnkeyatts",
-        "indisunique",
-        "indisprimary",
-        "indisexclusion",
-        "indimmediate",
-        # "indisclustered",
-        # "indisvalid",
-        # "indcheckxmin",
-        # "indisready",
-        # "indislive",
-        # "indisreplident",
-        "indkey",
-        # "indcollation",
-        # "indclass",
-        # "indoption",
-        # "indexprs",
-        # "indpred",
-    ]
+PG_INDEX_SCHEMA = [
+    "indexrelid",
+    "indrelid",
+    "indnatts",
+    "indnkeyatts",
+    "indisunique",
+    "indisprimary",
+    "indisexclusion",
+    "indimmediate",
+    # "indisclustered",
+    # "indisvalid",
+    # "indcheckxmin",
+    # "indisready",
+    # "indislive",
+    # "indisreplident",
+    "indkey",
+    # "indcollation",
+    # "indclass",
+    # "indoption",
+    # "indexprs",
+    # "indpred",
+]
 
+
+def process_time_pg_index(time_pg_index):
     cols_remove = [col for col in time_pg_index.columns if col not in PG_INDEX_SCHEMA]
     time_pg_index["unix_timestamp"] = time_pg_index.time.astype(float) / 1e6
     time_pg_index.drop(labels=cols_remove, axis=1, inplace=True, errors='ignore')
@@ -250,3 +286,10 @@ def build_time_index_metadata(pg_index, tables, cls_indexes, pg_attribute):
 
     del pg_attribute
     return time_pg_index
+
+
+def process_time_pg_settings(time_pg_settings):
+    time_pg_settings["unix_timestamp"] = time_pg_settings.time.astype(float) / 1e6
+    time_pg_settings.reset_index(drop=True, inplace=True)
+    time_pg_settings["pg_settings_identifier"] = time_pg_settings.index
+    return time_pg_settings

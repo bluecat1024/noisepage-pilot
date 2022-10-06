@@ -140,6 +140,10 @@ class OperatingUnit(Enum):
     WorkTableScan = 45
     DestReceiverRemote = 46
 
+    TupleARInsertTriggers = 47
+    TupleARUpdateTriggers = 48
+    TupleARDeleteTriggers = 49
+
 
 class Targets(Enum):
     ELAPSED_US = "elapsed_us"
@@ -155,25 +159,31 @@ column in pg_qss_stats that should be remapped.
 """
 EXECUTION_FEATURES_MAP = {
     "DestReceiverRemote_num_output": "counter0",
+
     "IndexOnlyScan_num_iterator_used": "counter0",
     "IndexOnlyScan_num_heap_fetches": "counter1",
     "IndexOnlyScan_num_defrag": "counter3",
+
     "IndexScan_num_iterator_used": "counter0",
     "IndexScan_num_heap_fetches": "counter1",
     "IndexScan_num_outer_loops": "counter2",
     "IndexScan_num_defrag": "counter3",
+
     "SeqScan_num_iterator_used": "counter0",
     "SeqScan_num_defrag": "counter1",
+
     "ModifyTableInsert_num_br_ir_as_triggers_fired": "counter0",
     "ModifyTableInsert_num_spec_insert": "counter1",
     "ModifyTableInsert_num_tuple_toast": "counter2",
     "ModifyTableInsert_num_fsm_checks": "counter3",
     "ModifyTableInsert_num_extends": "counter4",
+
     "ModifyTableIndexInsert_indexid": "payload",
     "ModifyTableIndexInsert_num_fsm_checks": "counter0",
     "ModifyTableIndexInsert_num_extends": "counter1",
     "ModifyTableIndexInsert_num_splits": "counter2",
     "ModifyTableIndexInsert_num_finish_splits": "counter3",
+
     "ModifyTableUpdate_num_br_ir_as_triggers_epq_fired": "counter0",
     "ModifyTableUpdate_num_index_updates_fired": "counter1",
     "ModifyTableUpdate_num_tuple_toast": "counter2",
@@ -184,12 +194,14 @@ EXECUTION_FEATURES_MAP = {
     "ModifyTableUpdate_num_lock_wait_members": "counter7",
     "ModifyTableUpdate_num_updates": "counter8",
     "ModifyTableUpdate_num_aborts": "counter9",
+
     "ModifyTableDelete_num_br_ir_as_triggers_fired": "counter0",
     "ModifyTableDelete_num_recheck_quals": "counter1",
     "ModifyTableDelete_num_tuple_returns": "counter2",
     "ModifyTableDelete_num_acquire_tuplock": "counter3",
     "ModifyTableDelete_num_lock_wait_members": "counter4",
     "ModifyTableDelete_num_deletes": "counter5",
+
     "LockRows_num_marks": "counter0",
     "LockRows_num_invoke_epq": "counter1",
     "LockRows_num_update_find_latest": "counter2",
@@ -200,14 +212,22 @@ EXECUTION_FEATURES_MAP = {
     "LockRows_num_heap_lock_updated_tuple_rec_wait_members": "counter7",
     "LockRows_num_non_lock_wait_block_policy": "counter8",
     "LockRows_num_aborts": "counter9",
+
     "Agg_num_input_rows": "counter0",
+
     "NestLoop_num_outer_rows": "counter0",
     "NestLoop_num_inner_rows_cumulative": "counter1",
+
     "BitmapIndexScan_num_tids_found": "counter0",
+
     "BitmapHeapScan_num_blocks_fetch": "counter0",
     "BitmapHeapScan_num_empty_tuples": "counter1",
     "BitmapHeapScan_num_tuples_fetch": "counter2",
     "BitmapHeapScan_num_blocks_prefetch": "counter3",
+
+    "TupleARInsertTriggers_num_triggers": "counter0",
+    "TupleARUpdateTriggers_num_triggers": "counter0",
+    "TupleARDeleteTriggers_num_triggers": "counter0",
 }
 
 
@@ -225,5 +245,3 @@ for ou in OperatingUnit:
 
     feats = ["total_cost", "startup_cost"]
     DERIVED_FEATURES_MAP.update({feat + "_" + ou.name: feat for feat in feats})
-
-# Add all the KNOBS

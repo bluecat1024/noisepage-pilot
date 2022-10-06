@@ -52,8 +52,8 @@ def generate_per_query_plots(query_stream, dir_output):
 
         # Plot elapsed and predicted elapsed time on the same graph as a scatter.
         x_title = "order" if "order" in query_stream else "query_order"
-        group[1].plot(title=f"qid: {group[0]}", x=x_title, y="elapsed_us", color='r', ax=ax, kind='scatter')
-        group[1].plot(title=f"qid: {group[0]}", x=x_title, y="pred_elapsed_us", color='b', ax=ax, kind='scatter')
+        group[1].plot.scatter(title=f"qid: {group[0]}", x=x_title, y="elapsed_us", color='r', ax=ax)
+        group[1].plot.scatter(title=f"qid: {group[0]}", x=x_title, y="pred_elapsed_us", color='b', ax=ax)
         ax.set_xticks([])
 
         if len(group[1]) > 1 and len(group[1].predicted_minus_elapsed.value_counts()) > 1:
@@ -239,6 +239,7 @@ def generate_txn_plots(query_stream, output_dir, txn_analysis_file):
         analysis = yaml.load(f, Loader=yaml.FullLoader)
 
     if not Path("/tmp/analysis/done").exists():
+        query_stream["query_text"] = query_stream.query_text.str.lower()
         txn_groupings = {txn_name: [] for txn_name in analysis}
         for txn, txn_queries in tqdm(query_stream.groupby(by=["txn"])):
             valid_txn_name = None
@@ -326,6 +327,10 @@ def main(dir_input, txn_analysis_file, generate_summary, generate_holistic, gene
         query_stream["predicted_minus_elapsed"] = query_stream["pred_elapsed_us"] - query_stream["elapsed_us"]
         query_stream["abs_diff"] = query_stream.predicted_minus_elapsed.apply(lambda c: abs(c))
         query_stream["cnt"] = 1
+
+        if "query_order" not in query_stream:
+            query_stream.sort_values(by=["statement_timestamp"], inplace=True, ignore_index=True)
+            query_stream["query_order"] = query_stream.index
 
         consider_streams = [("original", query_stream),]
         if Path(input_result.parent / "ddl_changes.pickle").exists():

@@ -1,7 +1,7 @@
 # Modeling Configuration
 modeling:
   methods: [gbm_l2]
-  normalize: True
+  normalize: False
   log_transform: False
   robust: False
   num_jobs: 8

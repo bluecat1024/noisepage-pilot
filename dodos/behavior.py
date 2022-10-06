@@ -27,9 +27,7 @@ POSTGRESQL_CONF = Path("config/postgres/default_postgresql.conf").absolute()
 # Output: model directory.
 ARTIFACT_WORKLOADS = ARTIFACTS_PATH / "workloads"
 ARTIFACT_DATA_RAW = ARTIFACTS_PATH / "data/raw"
-ARTIFACT_DATA_QSS = ARTIFACTS_PATH / "data/qss"
-ARTIFACT_DATA_DIFF = ARTIFACTS_PATH / "data/diff"
-ARTIFACT_DATA_MERGE = ARTIFACTS_PATH / "data/merge"
+ARTIFACT_DATA_OUS = ARTIFACTS_PATH / "data/ous"
 ARTIFACT_MODELS = ARTIFACTS_PATH / "models"
 ARTIFACT_EVALS_OU = ARTIFACTS_PATH / "evals_ou"
 ARTIFACT_EVALS_QUERY = ARTIFACTS_PATH / "evals_query"
@@ -104,54 +102,44 @@ def task_behavior_execute_workloads():
     }
 
 
-def task_behavior_perform_plan_extract_ou():
+def task_behavior_extract_ous():
     """
-    Behavior modeling: extract OUs from the experiment results.
+    Behavior modeling: extract OUs from the query state store.
     """
 
-    def extract_ou(glob_pattern):
-        args = f"--dir-datagen-data {ARTIFACT_DATA_RAW} "
+    def extract_ous(glob_pattern, work_prefix, host, port, db_name, user, preserve):
+        assert work_prefix is not None
+        assert db_name is not None
+        assert user is not None
+
+        args = (
+            f"--dir-data {ARTIFACT_DATA_RAW} "
+            f"--dir-output {ARTIFACT_DATA_OUS} "
+            f"--work-prefix {work_prefix} "
+            f"--db-name {db_name} "
+            f"--user {user} "
+        )
+
+        if host is not None:
+            args = args + f"--host {host} "
+
+        if port is not None:
+            args = args + f"--port {port} "
+
         if glob_pattern is not None:
-            args = args + f"--glob-pattern '{glob_pattern}'"
+            args = args + f"--glob-pattern '{glob_pattern}' "
 
-        return f"python3 -m behavior extract_ou {args}"
+        if preserve is not None:
+            args = args + f"--preserve "
 
-    return {
-        "actions": [CmdAction(extract_ou, buffering=1),],
-        "uptodate": [False],
-        "verbosity": VERBOSITY_DEFAULT,
-        "params": [
-            {
-                "name": "glob_pattern",
-                "long": "glob_pattern",
-                "help": "Glob pattern for selecting which experiments to extract OUs for.",
-                "default": None,
-            },
-        ],
-    }
-
-
-def task_behavior_perform_plan_extract_qss():
-    """
-    Behavior modeling: extract features from query state store and standardize columns.
-    """
-
-    def extract_qss(glob_pattern, output_ous):
-        args = f"--dir-datagen-data {ARTIFACT_DATA_RAW} " f"--dir-output {ARTIFACT_DATA_QSS} "
-        if glob_pattern is not None:
-            args = args + f"--glob-pattern '{glob_pattern}'"
-
-        if output_ous is not None:
-            args = args + f"--output-ous '{output_ous}'"
-
-        return f"python3 -m behavior extract_qss {args}"
+        return f"python3 -m behavior extract_ous {args}"
 
     return {
         "actions": [
-            f"mkdir -p {ARTIFACT_DATA_QSS}",
-            CmdAction(extract_qss, buffering=1),
+            f"mkdir -p {ARTIFACT_DATA_OUS}",
+            CmdAction(extract_ous, buffering=1),
         ],
-        "targets": [ARTIFACT_DATA_QSS],
+        "targets": [ARTIFACT_DATA_OUS],
         "uptodate": [False],
         "verbosity": VERBOSITY_DEFAULT,
         "params": [
@@ -162,96 +150,39 @@ def task_behavior_perform_plan_extract_qss():
                 "default": None,
             },
             {
-                "name": "output_ous",
-                "long": "output_ous",
-                "help": "Comma separated list of OUs to output.",
-                "default": None,
-            }
-        ],
-    }
-
-
-def task_behavior_perform_plan_diff():
-    """
-    Behavior modeling: perform plan differencing.
-    """
-
-    def datadiff_action(glob_pattern, output_ous):
-        datadiff_args = (
-            f"--dir-datagen-data {ARTIFACT_DATA_QSS} "
-            f"--dir-output {ARTIFACT_DATA_DIFF} "
-        )
-
-        if glob_pattern is not None:
-            datadiff_args = datadiff_args + f"--glob-pattern '{glob_pattern}'"
-
-        if output_ous is not None:
-            datadiff_args = datadiff_args + f"--output-ous '{output_ous}'"
-
-        # Include the cython compiled modules in PYTHONPATH.
-        return f"PYTHONPATH=artifacts/:$PYTHONPATH python3 -m behavior diff {datadiff_args}"
-
-    return {
-        "actions": [
-            # The following command is necessary to force a rebuild everytime. Recompile diff_c.pyx.
-            "rm -f behavior/model_ous/process/diff_c.c",
-            f"python3 behavior/model_ous/process/setup.py build_ext --build-lib artifacts/ --build-temp {default_build_path()}",
-            f"mkdir -p {ARTIFACT_DATA_DIFF}",
-            CmdAction(datadiff_action, buffering=1),
-        ],
-        "file_dep": [
-            dodos.benchbase.ARTIFACT_benchbase,
-            dodos.noisepage.ARTIFACT_postgres,
-        ],
-        "targets": [ARTIFACT_DATA_DIFF],
-        "uptodate": [False],
-        "verbosity": VERBOSITY_DEFAULT,
-        "params": [
-            {
-                "name": "glob_pattern",
-                "long": "glob_pattern",
-                "help": "Glob pattern for selecting which experiments to perform differencing.",
+                "name": "work_prefix",
+                "long": "work_prefix",
+                "help": "Prefix to use for creating and operating tables.",
                 "default": None,
             },
             {
-                "name": "output_ous",
-                "long": "output_ous",
-                "help": "Comma separated list of OUs to output.",
+                "name": "host",
+                "long": "host",
+                "help": "Host of the database instance to use.",
+                "default": "localhost",
+            },
+            {
+                "name": "port",
+                "long": "port",
+                "help": "Port of the database instance to connect to.",
+                "default": "5432",
+            },
+            {
+                "name": "db_name",
+                "long": "db_name",
+                "help": "Name of the database to use.",
                 "default": None,
             },
-        ],
-    }
-
-
-def task_behavior_perform_plan_state_merge():
-    """
-    Behavior modeling: perform merging of raw data with snapshots.
-    """
-    def merge_action(glob_pattern):
-        args = f"--dir-datagen-merge {ARTIFACT_DATA_DIFF} " f"--dir-output {ARTIFACT_DATA_MERGE}"
-        if glob_pattern is not None:
-            args = args + f" --glob-pattern '{glob_pattern}'"
-
-        return f"python3 -m behavior state_merge {args}"
-
-    return {
-        "actions": [
-            f"mkdir -p {ARTIFACT_DATA_MERGE}",
-            CmdAction(merge_action, buffering=1)
-        ],
-        "file_dep": [
-            dodos.noisepage.ARTIFACT_postgres,
-        ],
-        "targets": [
-            ARTIFACT_DATA_MERGE
-        ],
-        "uptodate": [False],
-        "verbosity": VERBOSITY_DEFAULT,
-        "params": [
             {
-                "name": "glob_pattern",
-                "long": "glob_pattern",
-                "help": "Glob pattern for selecting which experiments to perform merging.",
+                "name": "user",
+                "long": "user",
+                "help": "User to connect to the database with.",
+                "default": None,
+            },
+            {
+                "name": "preserve",
+                "long": "preserve",
+                "help": "Whether to preserve state of the database.",
                 "default": None,
             },
         ],
@@ -297,7 +228,7 @@ def task_behavior_train():
                 "name": "train_data",
                 "long": "train_data",
                 "help": "Root of a recursive glob to gather all feather files for training data.",
-                "default": ARTIFACT_DATA_MERGE,
+                "default": ARTIFACT_DATA_OUS,
             },
             {
                 "name": "prefix_allow_derived_features",
@@ -364,7 +295,7 @@ def task_behavior_eval_ou():
                 "name": "eval_data",
                 "long": "eval_data",
                 "help": "Path to root folder containing feathers for evaluation purposes. (structure: [experiment]/[benchmark]/*.feather)",
-                "default": ARTIFACT_DATA_MERGE,
+                "default": ARTIFACT_DATA_OUS,
             },
             {
                 "name": "skip_generate_plots",

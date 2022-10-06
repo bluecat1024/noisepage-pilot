@@ -62,7 +62,7 @@ def main(dir_models, methods, dir_data, base_output, generate_plots):
                 continue
 
         # Evaluation is expected of form [experiment]/[benchmark]/[OU].feather
-        for feather in dir_data.rglob('*.feather'):
+        for feather in dir_data.rglob('*.csv'):
             if feather.name.startswith(model.ou_name):
                 print("Evaluating ", model.method, model.ou_name, "on data", feather)
 
@@ -87,7 +87,7 @@ class EvalOUCLI(cli.Application):
         "--dir-data",
         Path,
         mandatory=True,
-        help="Folder containing evaluation CSVs. (structure: [experiment]/[benchmark]/*.feather)",
+        help="Folder containing evaluation CSVs. (structure: [experiment]/[benchmark]/*.csv)",
     )
     dir_evals_output = cli.SwitchAttr(
         "--dir-evals-output",

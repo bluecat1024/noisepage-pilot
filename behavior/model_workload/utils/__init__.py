@@ -1,6 +1,14 @@
 import numpy as np
 import pandas as pd
 import pickle
+from enum import Enum
+
+
+class OpType(Enum):
+    SELECT = 1
+    INSERT = 2
+    UPDATE = 3
+    DELETE = 4
 
 
 def keyspace_metadata_output(container, *args):
@@ -90,65 +98,3 @@ def compute_frames(chunk, data_map, join_map, touched_tbls, table_attr_map, tabl
             all_keys = table_attr_map[tbl]
             data_map[tbl], join_map[tbl], touched = compute_frame(data_map[tbl], group[1], pk_keys, all_keys, logger)
             touched_tbls[tbl] |= touched
-
-
-class SliceLoader():
-    def _load_next_chunk(self):
-        self.current_chunk = pd.read_feather(self.files[0])
-        self.files = self.files[1:]
-
-    def __init__(self, logger, files, slice_window):
-        super(SliceLoader, self).__init__()
-        self.files = files
-        self.slice_window = slice_window
-        self._load_next_chunk()
-        self.slice_num = 0
-        self.logger = logger
-
-    def _get_from_chunk(self, num):
-        assert num <= self.current_chunk.shape[0]
-        chunk = self.current_chunk.iloc[:num].copy()
-        chunk.reset_index(drop=True, inplace=True)
-        self.current_chunk = self.current_chunk.iloc[num:]
-        return chunk
-
-    def _num_slice_elements(self, chunk):
-        # Computes the number of elements satisfying the "slice" property.
-        # This is typically the # of unique statement_timestamp but can also be a tuple.
-        return chunk[["statement_timestamp", "pid"]].drop_duplicates().shape[0]
-
-    def _get_num_for_slice_elements(self, chunk, slice_elems):
-        if slice_elems >= self._num_slice_elements(chunk):
-            return chunk.shape[0]
-
-        c = chunk[["statement_timestamp", "pid"]].drop_duplicates().sort_values(by=["statement_timestamp", "pid"], ignore_index=True)
-        ub = c.iloc[slice_elems]
-
-        leq_st = chunk.statement_timestamp < ub.statement_timestamp
-        match_st = (chunk.statement_timestamp == ub.statement_timestamp) & (chunk.statement_timestamp < ub.pid)
-        return (chunk[leq_st | match_st]).shape[0]
-
-    def get_next_slice(self):
-        if self._num_slice_elements(self.current_chunk) >= self.slice_window:
-            slice_num = self.slice_num
-            self.slice_num = self.slice_num + 1
-            return slice_num, self._get_from_chunk(self._get_num_for_slice_elements(self.current_chunk, self.slice_window))
-
-        if self.current_chunk.shape[0] == 0:
-            chunk = None
-        else:
-            # Get the whole chunk since we know we need all of it.
-            chunk = self._get_from_chunk(self.current_chunk.shape[0])
-
-        while (chunk is None or self._num_slice_elements(chunk) < self.slice_window) and len(self.files) > 0:
-            # Load the next chunk.
-            self._load_next_chunk()
-
-            cur_size = 0 if chunk is None else chunk.statement_timestamp.nunique()
-            data_slice = self._get_num_for_slice_elements(self.current_chunk, self.slice_window - cur_size)
-            next_chunk = self._get_from_chunk(data_slice)
-            chunk = pd.concat([chunk, next_chunk], ignore_index=True)
-
-        slice_num = self.slice_num
-        self.slice_num = self.slice_num + 1
-        return slice_num, chunk
