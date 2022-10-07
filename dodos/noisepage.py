@@ -12,8 +12,8 @@ ARTIFACTS_PATH = default_artifacts_path()
 BUILD_PATH = default_build_path()
 DEFAULT_POSTGRESQL_CONF_PATH = Path("config/postgres/default_postgresql.conf").absolute()
 
-DEFAULT_DB = "benchbase_gcn"
-DEFAULT_USER = "su_gcn"
+DEFAULT_DB = "benchbase"
+DEFAULT_USER = "admin"
 DEFAULT_PASS = "pass_gcn"
 DEFAULT_PGDATA = "pgdata"
 
@@ -36,7 +36,7 @@ def task_noisepage_clone():
     """
 
     def repo_clone(repo_url):
-        cmd = f"git clone {repo_url} --branch new_pg14 --single-branch --depth 1 {BUILD_PATH}"
+        cmd = f"git clone {repo_url} --branch new_pg14_gcn --single-branch --depth 1 {BUILD_PATH}"
         return cmd
 
     return {
@@ -56,7 +56,7 @@ def task_noisepage_clone():
                 "name": "repo_url",
                 "long": "repo_url",
                 "help": "The repository to clone from.",
-                "default": "https://github.com/17zhangw/postgres.git",
+                "default": "https://github.com/bluecat1024/postgres.git",
             },
         ],
     }
@@ -100,16 +100,12 @@ def task_noisepage_init():
     """
     NoisePage: start a clean NoisePage instance in detached mode.
     """
-    global_dbname = "benchbase_gcn"
 
     def run_noisepage_detached(config, dbname):
         assert Path(config).exists(), f"{config} does not exist."
         local["cp"][f"{config}", f"{DEFAULT_PGDATA}/postgresql.conf"].run_nohup()
         ret = local["./pg_ctl"]["start", "-D", DEFAULT_PGDATA].run_nohup(stdout="noisepage.out")
         print(f"NoisePage PID: {ret.pid}")
-
-        global global_dbname
-        global_dbname = dbname
 
     sql_list = [
         f"CREATE ROLE {DEFAULT_USER} WITH LOGIN SUPERUSER ENCRYPTED PASSWORD '{DEFAULT_PASS}'",
@@ -123,8 +119,8 @@ def task_noisepage_init():
             f"./initdb {DEFAULT_PGDATA}",
             run_noisepage_detached,
             "until ./pg_isready ; do sleep 1 ; done",
-            f"./createdb {global_dbname}",
-            *[f'./psql --dbname={global_dbname} --command="{sql}"' for sql in sql_list],
+            f"./createdb {DEFAULT_DB}",
+            *[f'./psql --dbname={DEFAULT_DB} --command="{sql}"' for sql in sql_list],
             # Reset working directory.
             lambda: os.chdir(doit.get_initial_workdir()),
         ],
@@ -435,6 +431,39 @@ def task_noisepage_disable_logging():
             lambda: os.chdir(doit.get_initial_workdir()),
         ],
         "verbosity": VERBOSITY_DEFAULT,
+    }
+
+def task_noisepage_set_fillfactor():
+    """
+    NoisePage: Set fill factor of all tables and VACUUM FULL.
+    Not supporting other workloads than TPC-C.
+    """
+    table_list = ['warehouse', 'district', 'item', 'customer', 'stock',\
+        'oorder', 'new_order', 'history', 'order_line',]
+
+    def run_query_in_db(fillfactor):
+        for tname in table_list:
+            sql = f"ALTER TABLE {tname} SET ( fillfactor = {fillfactor})"
+            os.system(f'PGPASSWORD={DEFAULT_PASS} ./psql --dbname={DEFAULT_DB} --username={DEFAULT_USER} --command="{sql}"')
+            sql = f"VACUUM FULL {tname}"
+            os.system(f'PGPASSWORD={DEFAULT_PASS} ./psql --dbname={DEFAULT_DB} --username={DEFAULT_USER} --command="{sql}"')
+
+    return {
+        "actions": [
+            lambda: os.chdir(ARTIFACTS_PATH),
+            run_query_in_db,
+            # Reset working directory.
+            lambda: os.chdir(doit.get_initial_workdir()),
+        ],
+        "verbosity": VERBOSITY_DEFAULT,
+        "params": [
+            {
+                "name": "fillfactor",
+                "long": "fillfactor",
+                "help": "Specify the fillfactor.",
+                "default": DEFAULT_DB,
+            },
+        ],
     }
 
 
