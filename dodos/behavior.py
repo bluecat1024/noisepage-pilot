@@ -590,3 +590,74 @@ def task_behavior_eval_query_plots():
             },
         ],
     }
+
+
+def task_behavior_eval_query_compare_plots():
+    """
+    Behavior modeling: generate plots from comparative workload analysis.
+    """
+    def eval_cmd(input_dir, input_names, dir_output, txn_analysis_file, generate_per_query, generate_predict_abs_errors):
+        eval_args = (
+            f"--dir-input {input_dir} "
+            f"--input-names {input_names} "
+            f"--dir-output {dir_output} "
+        )
+
+        vals = [
+            ("--generate-per-query", generate_per_query),
+            ("--generate-predict-abs-errors", generate_predict_abs_errors),
+        ]
+
+        for (k, v) in vals:
+            if v is not None and v != "False":
+                eval_args += f"{k} "
+
+        if txn_analysis_file is not None:
+            assert Path(txn_analysis_file).exists()
+            eval_args += f"--txn-analysis-file {txn_analysis_file} "
+
+        return f"python3 -m behavior eval_query_compare_plots {eval_args}"
+
+    return {
+        "actions": [CmdAction(eval_cmd, buffering=1)],
+        "verbosity": VERBOSITY_DEFAULT,
+        "uptodate": [False],
+        "params": [
+            {
+                "name": "input_dir",
+                "long": "input_dir",
+                "help": "Path to root folder containing the input data to plot.",
+                "default": None,
+            },
+            {
+                "name": "input_names",
+                "long": "input_names",
+                "help": "Names of the input models.",
+                "default": None,
+            },
+            {
+                "name": "dir_output",
+                "long": "dir_output",
+                "help": "Path to folder for output.",
+                "default": None,
+            },
+            {
+                "name": "txn_analysis_file",
+                "long": "txn_analysis_file",
+                "help": "Path to transaction analysis file.",
+                "default": None,
+            },
+            {
+                "name": "generate_per_query",
+                "long": "generate_per_query",
+                "help": "Whether to generate per-query plots of the errors.",
+                "default": None,
+            },
+            {
+                "name": "generate_predict_abs_errors",
+                "long": "generate_predict_abs_errors",
+                "help": "Whether to generate abs errors against each table.",
+                "default": None,
+            },
+        ],
+    }

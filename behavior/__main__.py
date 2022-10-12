@@ -9,6 +9,7 @@ from behavior.model_ous import extract_ous
 from behavior.model_ous import eval_ou
 from behavior.model_query import eval_query
 from behavior.model_query import plot
+from behavior.model_query import compare_plot
 
 from behavior.model_workload import analyze
 from behavior.model_workload import exec_feature_synthesis
@@ -39,5 +40,6 @@ if __name__ == "__main__":
 
     BehaviorCLI.subcommand("eval_query", eval_query.EvalQueryCLI)
     BehaviorCLI.subcommand("eval_query_plots", plot.EvalQueryPlotsCLI)
+    BehaviorCLI.subcommand("eval_query_compare_plots", compare_plot.EvalQueryComparePlotsCLI)
 
     BehaviorCLI.run()
