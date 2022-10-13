@@ -182,7 +182,7 @@ def collector(histograms, collector_flags, pid, socket_fd):
 
     markers = USDT(pid=pid)
     marker_probes = USDT(pid=pid)
-    for probe in ["qss_ExecutorStart", "qss_ExecutorEnd"]:
+    for probe in ["qss_ExecutorStart", "qss_ExecutorEnd", "qss_Block", "qss_Unblock"]:
         marker_probes.enable_probe(probe=probe, fn_name=probe)
 
     cflags = ['-DKBUILD_MODNAME="collector"']
@@ -194,25 +194,26 @@ def collector(histograms, collector_flags, pid, socket_fd):
     collector_bpf.attach_kretprobe(event="vfs_write", fn_name="trace_write_return")
 
     window_count = 0
-    histogram = collector_bpf.get_table("dist")
+    hists = [(0, collector_bpf.get_table("dist0")), (1, collector_bpf.get_table("dist6")),  (2, collector_bpf.get_table("dist10")),]
     while collector_flags[pid]:
         try:
             # No perf event, so just sleep...
             if pid not in collector_pids:
-                hist = { "time": time.time_ns() / 1000, "window_index": window_count, "pid": pid, }
-                for i in range(1, 65):
-                    low = (1 << i) >> 1;
-                    high = (1 << i) - 1;
-                    if low == high:
-                        low -= 1
-                    key = f"{low}_{high}"
+                for sl, histogram in hists:
+                    hist = { "time": time.time_ns() / 1000, "elapsed_slice": sl, "window_index": window_count, "pid": pid, }
+                    for i in range(1, 32):
+                        low = (1 << i) >> 1;
+                        high = (1 << i) - 1;
+                        if low == high:
+                            low -= 1
+                        key = f"{low}_{high}"
 
-                    try:
-                        hist[key] = histogram[i].value
-                    except:
-                        hist[key] = 0
+                        try:
+                            hist[key] = histogram[i].value
+                        except:
+                            hist[key] = 0
 
-                histograms.append(hist)
+                    histograms.append(hist)
                 window_count += 1
 
             # Try and get second level histogram resolutions.
