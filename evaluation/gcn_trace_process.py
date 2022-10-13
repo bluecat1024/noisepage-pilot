@@ -15,14 +15,14 @@ SECS_PER_DAY = 86400
 
 # Get start_time and the EXPLAIN ANALYZE plan tree for sample query in the middle.
 def sample_workload(folder_path, csv_path,
-    sample_count = 7500000, start_count=100000, serial=False):
+    sample_count = 5000000, start_count=100000, serial=False):
     if serial:
         sample_workload(folder_path + '10', csv_path,
-            6000000, start_count=100000)
+            5000000, start_count=100000)
         sample_workload(folder_path + '50', csv_path,
-            6000000, start_count=10000000)
+            5000000, start_count=7500000)
         sample_workload(folder_path + '100', csv_path,
-            6000000, start_count=19000000)
+            5000000, start_count=15000000)
 
         return
 
@@ -52,6 +52,7 @@ def sample_workload(folder_path, csv_path,
                 'query_text' : raw_json['Query Text'],
                 'query_id' : raw_json['query_id'],
                 'elapsed_us': raw_json['elapsed_us'],
+                'txn_id': raw_json['txn_id'],
             }
 
             if (len(json_list) < sample_count):

@@ -259,7 +259,7 @@ def task_noisepage_qss_install():
             WITH (autovacuum_enabled = OFF)""",
         "ALTER SYSTEM SET shared_preload_libraries='qss','pgstattuple'",
         "ALTER SYSTEM SET qss_capture_enabled = ON",
-        "ALTER SYSTEM SET qss_capture_nested = ON",
+        "ALTER SYSTEM SET qss_capture_nested = OFF",
         "ALTER SYSTEM SET qss_capture_exec_stats = ON",
         "ALTER SYSTEM SET qss_output_noisepage = OFF",
         "ALTER SYSTEM SET log_statement='none'",
