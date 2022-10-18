@@ -1,3 +1,4 @@
+import pglast
 import gc
 import re
 import json
@@ -34,9 +35,25 @@ def prepare_inference_query_stream(dir_data):
     pg_qss_plans = pd.read_csv(dir_data / "pg_qss_plans.csv")
     pg_qss_plans["id"] = pg_qss_plans.index
     pg_qss_plans["query_text"] = ""
+    pg_qss_plans["target"] = ""
     for plan in pg_qss_plans.itertuples():
         feature = json.loads(plan.features)
         query_text = feature[0]["query_text"].lower()
+        target = ""
+        if query_text is not None:
+            root = pglast.Node(pglast.parse_sql(query_text))
+            for node in root.traverse():
+                if isinstance(node, pglast.node.Node):
+                    if isinstance(node.ast_node, pglast.ast.InsertStmt):
+                        target = node.ast_node.relation.relname
+                    elif isinstance(node.ast_node, pglast.ast.UpdateStmt):
+                        target = node.ast_node.relation.relname
+                    elif isinstance(node.ast_node, pglast.ast.DeleteStmt):
+                        target = node.ast_node.relation.relname
+                    elif isinstance(node.ast_node, pglast.ast.SelectStmt) and node.ast_node.fromClause is not None:
+                        for n in node.ast_node.fromClause:
+                            if isinstance(n, pglast.ast.RangeVar):
+                                target = n.relname
 
         blocked = False
         for query in QUERY_CONTENT_BLOCK:
@@ -44,6 +61,7 @@ def prepare_inference_query_stream(dir_data):
                 query_text = None
                 blocked = True
         pg_qss_plans.at[plan.Index, "query_text"] = query_text
+        pg_qss_plans.at[plan.Index, "target"] = target
     pg_qss_plans.drop(labels=["features"], axis=1, inplace=True)
     pg_qss_plans.drop(pg_qss_plans[pg_qss_plans.query_text.isna()].index, inplace=True)
     gc.collect()
@@ -62,10 +80,13 @@ def prepare_inference_query_stream(dir_data):
     del pg_qss_plans
     gc.collect()
 
+    # We still want the original query_text for transaction grouping.
+    query_stats["prepared_query_text"] = query_stats["query_text"]
+
     # Parametrize the query. (not done with apply due to memory constraints).
     for query in tqdm(query_stats.itertuples(), total=query_stats.shape[0]):
         matches = re.findall(r'(\$\w+) = (\'(?:[^\']*(?:\'\')?[^\']*)*\')', query.params)
-        query_text = query.query_text
+        query_text = query.prepared_query_text
         if len(matches) > 0:
             parts = []
             for match in matches:
@@ -75,8 +96,8 @@ def prepare_inference_query_stream(dir_data):
                 query_text = query_text[start+len(match[0]):]
             parts.append(query_text)
             query_text = "".join(parts)
-        query_stats.at[query.Index, "query_text"] = query_text
-    query_stats.drop(labels=["params", "id", "generation", "comment", "txn"], axis=1, inplace=True)
+        query_stats.at[query.Index, "prepared_query_text"] = query_text
+    query_stats.drop(labels=["params", "id", "generation", "comment"], axis=1, inplace=True)
 
     # Sort by statement_timestamp so we are processing the query stream in serial.
     query_stats.set_index(keys=["statement_timestamp"], drop=True, append=False, inplace=True)

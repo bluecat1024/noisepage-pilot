@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 
+from datetime import datetime
 from doit.action import CmdAction
 from plumbum import local, FG
 
@@ -21,34 +22,16 @@ BUILD_PATH = default_build_path()
 # Input: various configuration files.
 DATAGEN_CONFIG_FILE = Path("config/behavior/datagen.yaml").absolute()
 MODELING_CONFIG_FILE = Path("config/behavior/modeling.yaml").absolute()
-SKYNET_CONFIG_FILE = Path("config/behavior/skynet.yaml").absolute()
 POSTGRESQL_CONF = Path("config/postgres/default_postgresql.conf").absolute()
 
 # Output: model directory.
 ARTIFACT_WORKLOADS = ARTIFACTS_PATH / "workloads"
 ARTIFACT_DATA_RAW = ARTIFACTS_PATH / "data/raw"
-ARTIFACT_DATA_QSS = ARTIFACTS_PATH / "data/qss"
-ARTIFACT_DATA_DIFF = ARTIFACTS_PATH / "data/diff"
-ARTIFACT_DATA_MERGE = ARTIFACTS_PATH / "data/merge"
+ARTIFACT_DATA_OUS = ARTIFACTS_PATH / "data/ous"
 ARTIFACT_MODELS = ARTIFACTS_PATH / "models"
 ARTIFACT_EVALS_OU = ARTIFACTS_PATH / "evals_ou"
 ARTIFACT_EVALS_QUERY = ARTIFACTS_PATH / "evals_query"
 ARTIFACT_EVALS_QUERY_WORKLOAD = ARTIFACTS_PATH / "evals_query_workload"
-
-
-def task_behavior_skynet():
-    """
-    Behavior: Generate a run.sh script for executing an end-to-end pipeline.
-    """
-    skynet_args = (
-        f"--config-file {SKYNET_CONFIG_FILE} "
-    )
-
-    return {
-        "actions": [f"python3 -m behavior skynet {skynet_args}",],
-        "uptodate": [False],
-        "verbosity": VERBOSITY_DEFAULT,
-    }
 
 
 def task_behavior_generate_workloads():
@@ -119,54 +102,44 @@ def task_behavior_execute_workloads():
     }
 
 
-def task_behavior_perform_plan_extract_ou():
+def task_behavior_extract_ous():
     """
-    Behavior modeling: extract OUs from the experiment results.
+    Behavior modeling: extract OUs from the query state store.
     """
 
-    def extract_ou(glob_pattern):
-        args = f"--dir-datagen-data {ARTIFACT_DATA_RAW} "
+    def extract_ous(glob_pattern, work_prefix, host, port, db_name, user, preserve):
+        assert work_prefix is not None
+        assert db_name is not None
+        assert user is not None
+
+        args = (
+            f"--dir-data {ARTIFACT_DATA_RAW} "
+            f"--dir-output {ARTIFACT_DATA_OUS} "
+            f"--work-prefix {work_prefix} "
+            f"--db-name {db_name} "
+            f"--user {user} "
+        )
+
+        if host is not None:
+            args = args + f"--host {host} "
+
+        if port is not None:
+            args = args + f"--port {port} "
+
         if glob_pattern is not None:
-            args = args + f"--glob-pattern '{glob_pattern}'"
+            args = args + f"--glob-pattern '{glob_pattern}' "
 
-        return f"python3 -m behavior extract_ou {args}"
+        if preserve is not None:
+            args = args + f"--preserve "
 
-    return {
-        "actions": [CmdAction(extract_ou, buffering=1),],
-        "uptodate": [False],
-        "verbosity": VERBOSITY_DEFAULT,
-        "params": [
-            {
-                "name": "glob_pattern",
-                "long": "glob_pattern",
-                "help": "Glob pattern for selecting which experiments to extract OUs for.",
-                "default": None,
-            },
-        ],
-    }
-
-
-def task_behavior_perform_plan_extract_qss():
-    """
-    Behavior modeling: extract features from query state store and standardize columns.
-    """
-
-    def extract_qss(glob_pattern, output_ous):
-        args = f"--dir-datagen-data {ARTIFACT_DATA_RAW} " f"--dir-output {ARTIFACT_DATA_QSS} "
-        if glob_pattern is not None:
-            args = args + f"--glob-pattern '{glob_pattern}'"
-
-        if output_ous is not None:
-            args = args + f"--output-ous '{output_ous}'"
-
-        return f"python3 -m behavior extract_qss {args}"
+        return f"python3 -m behavior extract_ous {args}"
 
     return {
         "actions": [
-            f"mkdir -p {ARTIFACT_DATA_QSS}",
-            CmdAction(extract_qss, buffering=1),
+            f"mkdir -p {ARTIFACT_DATA_OUS}",
+            CmdAction(extract_ous, buffering=1),
         ],
-        "targets": [ARTIFACT_DATA_QSS],
+        "targets": [ARTIFACT_DATA_OUS],
         "uptodate": [False],
         "verbosity": VERBOSITY_DEFAULT,
         "params": [
@@ -177,96 +150,39 @@ def task_behavior_perform_plan_extract_qss():
                 "default": None,
             },
             {
-                "name": "output_ous",
-                "long": "output_ous",
-                "help": "Comma separated list of OUs to output.",
-                "default": None,
-            }
-        ],
-    }
-
-
-def task_behavior_perform_plan_diff():
-    """
-    Behavior modeling: perform plan differencing.
-    """
-
-    def datadiff_action(glob_pattern, output_ous):
-        datadiff_args = (
-            f"--dir-datagen-data {ARTIFACT_DATA_QSS} "
-            f"--dir-output {ARTIFACT_DATA_DIFF} "
-        )
-
-        if glob_pattern is not None:
-            datadiff_args = datadiff_args + f"--glob-pattern '{glob_pattern}'"
-
-        if output_ous is not None:
-            datadiff_args = datadiff_args + f"--output-ous '{output_ous}'"
-
-        # Include the cython compiled modules in PYTHONPATH.
-        return f"PYTHONPATH=artifacts/:$PYTHONPATH python3 -m behavior diff {datadiff_args}"
-
-    return {
-        "actions": [
-            # The following command is necessary to force a rebuild everytime. Recompile diff_c.pyx.
-            "rm -f behavior/model_ous/process/diff_c.c",
-            f"python3 behavior/model_ous/process/setup.py build_ext --build-lib artifacts/ --build-temp {default_build_path()}",
-            f"mkdir -p {ARTIFACT_DATA_DIFF}",
-            CmdAction(datadiff_action, buffering=1),
-        ],
-        "file_dep": [
-            dodos.benchbase.ARTIFACT_benchbase,
-            dodos.noisepage.ARTIFACT_postgres,
-        ],
-        "targets": [ARTIFACT_DATA_DIFF],
-        "uptodate": [False],
-        "verbosity": VERBOSITY_DEFAULT,
-        "params": [
-            {
-                "name": "glob_pattern",
-                "long": "glob_pattern",
-                "help": "Glob pattern for selecting which experiments to perform differencing.",
+                "name": "work_prefix",
+                "long": "work_prefix",
+                "help": "Prefix to use for creating and operating tables.",
                 "default": None,
             },
             {
-                "name": "output_ous",
-                "long": "output_ous",
-                "help": "Comma separated list of OUs to output.",
+                "name": "host",
+                "long": "host",
+                "help": "Host of the database instance to use.",
+                "default": "localhost",
+            },
+            {
+                "name": "port",
+                "long": "port",
+                "help": "Port of the database instance to connect to.",
+                "default": "5432",
+            },
+            {
+                "name": "db_name",
+                "long": "db_name",
+                "help": "Name of the database to use.",
                 "default": None,
             },
-        ],
-    }
-
-
-def task_behavior_perform_plan_state_merge():
-    """
-    Behavior modeling: perform merging of raw data with snapshots.
-    """
-    def merge_action(glob_pattern):
-        args = f"--dir-datagen-merge {ARTIFACT_DATA_DIFF} " f"--dir-output {ARTIFACT_DATA_MERGE}"
-        if glob_pattern is not None:
-            args = args + f" --glob-pattern '{glob_pattern}'"
-
-        return f"python3 -m behavior state_merge {args}"
-
-    return {
-        "actions": [
-            f"mkdir -p {ARTIFACT_DATA_MERGE}",
-            CmdAction(merge_action, buffering=1)
-        ],
-        "file_dep": [
-            dodos.noisepage.ARTIFACT_postgres,
-        ],
-        "targets": [
-            ARTIFACT_DATA_MERGE
-        ],
-        "uptodate": [False],
-        "verbosity": VERBOSITY_DEFAULT,
-        "params": [
             {
-                "name": "glob_pattern",
-                "long": "glob_pattern",
-                "help": "Glob pattern for selecting which experiments to perform merging.",
+                "name": "user",
+                "long": "user",
+                "help": "User to connect to the database with.",
+                "default": None,
+            },
+            {
+                "name": "preserve",
+                "long": "preserve",
+                "help": "Whether to preserve state of the database.",
                 "default": None,
             },
         ],
@@ -278,18 +194,21 @@ def task_behavior_train():
     Behavior modeling: train OU models.
     """
 
-    def train_cmd(use_featurewiz, config_file, train_data, prefix_allow_derived_features):
+    def train_cmd(config_file, train_data, prefix_allow_derived_features, robust, log_transform):
         train_args = (
             f"--config-file {config_file} "
             f"--dir-data {train_data} "
             f"--dir-output {ARTIFACT_MODELS} "
         )
 
+        if robust is not None:
+            train_args = train_args + "--robust "
+
+        if log_transform is not None:
+            train_args = train_args + "--log-transform "
+
         if prefix_allow_derived_features != "":
             train_args = train_args + f"--prefix-allow-derived-features {prefix_allow_derived_features} "
-
-        if use_featurewiz == "True":
-            train_args = train_args + "--use-featurewiz "
 
         return f"python3 -m behavior train {train_args}"
 
@@ -300,12 +219,6 @@ def task_behavior_train():
         "uptodate": [False],
         "params": [
             {
-                "name": "use_featurewiz",
-                "long": "use_featurewiz",
-                "help": "Whether to use featurewiz for feature selection.",
-                "default": False,
-            },
-            {
                 "name": "config_file",
                 "long": "config_file",
                 "help": "Path to configuration file to use.",
@@ -315,13 +228,25 @@ def task_behavior_train():
                 "name": "train_data",
                 "long": "train_data",
                 "help": "Root of a recursive glob to gather all feather files for training data.",
-                "default": ARTIFACT_DATA_MERGE,
+                "default": ARTIFACT_DATA_OUS,
             },
             {
                 "name": "prefix_allow_derived_features",
                 "long": "prefix_allow_derived_features",
                 "help": "List of prefixes to use for selecting derived features for training the model.",
                 "default": "",
+            },
+            {
+                "name": "robust",
+                "long": "robust",
+                "help": "Whether to use the robust scaler to normalize to the data.",
+                "default": None,
+            },
+            {
+                "name": "log_transform",
+                "long": "log_transform",
+                "help": "Whether to use the log_transform to the data.",
+                "default": None,
             },
         ],
     }
@@ -331,7 +256,7 @@ def task_behavior_eval_ou():
     """
     Behavior modeling: eval OU models.
     """
-    def eval_cmd(eval_data, skip_generate_plots, models, methods):
+    def eval_cmd(eval_data, skip_generate_plots, models, methods, output_name):
         if models is None:
             # Find the latest experiment by last modified timestamp.
             experiment_list = sorted((exp_path for exp_path in ARTIFACT_MODELS.glob("*")), key=os.path.getmtime)
@@ -340,10 +265,16 @@ def task_behavior_eval_ou():
         else:
             assert os.path.isdir(models), f"Specified path {models} is not a valid directory."
 
+        assert Path(eval_data).exists(), f"Specified OU {eval_data} does not exist."
+
+        if output_name is None:
+            eval_timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            output_name = f"eval_{eval_timestamp}"
+
         eval_args = (
             f"--dir-data {eval_data} "
             f"--dir-models {models} "
-            f"--dir-evals-output {ARTIFACT_EVALS_OU} "
+            f"--dir-evals-output {ARTIFACT_EVALS_OU}/{output_name} "
         )
 
         if methods is not None:
@@ -364,7 +295,7 @@ def task_behavior_eval_ou():
                 "name": "eval_data",
                 "long": "eval_data",
                 "help": "Path to root folder containing feathers for evaluation purposes. (structure: [experiment]/[benchmark]/*.feather)",
-                "default": ARTIFACT_DATA_MERGE,
+                "default": ARTIFACT_DATA_OUS,
             },
             {
                 "name": "skip_generate_plots",
@@ -384,7 +315,13 @@ def task_behavior_eval_ou():
                 "long": "methods",
                 "help": "Comma separated methods that should be evaluated. Defaults to None (all).",
                 "default": None,
-            }
+            },
+            {
+                "name": "output_name",
+                "long": "output_name",
+                "help": "Name of the output directory.",
+                "default": None,
+            },
         ],
     }
 
@@ -476,30 +413,41 @@ def task_behavior_eval_query_workload():
     """
     Behavior modeling: perform query-level model analysis using a workload model.
     """
-    def eval_cmd(benchmark, session_sql, eval_raw_data, base_models, workload_model, psycopg2_conn, slice_window):
+    def eval_cmd(session_sql, eval_raw_data, base_models, workload_model, psycopg2_conn, compute_frames, eval_batch_size, use_workload_table_estimate, scratch_space, output):
         if base_models is None:
             # Find the latest experiment by last modified timestamp.
             experiment_list = sorted((exp_path for exp_path in ARTIFACT_MODELS.glob("*")), key=os.path.getmtime)
             assert len(experiment_list) > 0, "No experiments found."
             base_models = experiment_list[-1] / "gbm_l2"
 
-        assert benchmark in BENCHDB_TO_TABLES, "Unknwon benchmark specified."
         assert eval_raw_data is not None, "No path to experiment data specified."
         assert os.path.isdir(base_models), f"Specified path {base_models} is not a valid directory."
         assert psycopg2_conn is not None, "No Psycopg2 connection string is specified."
 
+        if output is None:
+            eval_timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            output = ARTIFACT_EVALS_QUERY_WORKLOAD / f"eval_{eval_timestamp}"
+
         eval_args = (
-            f"--benchmark {benchmark} "
             f"--dir-data {eval_raw_data} "
             f"--dir-base-models {base_models} "
             f"--dir-workload-model {workload_model} "
-            f"--dir-evals-output {ARTIFACT_EVALS_QUERY_WORKLOAD} "
+            f"--dir-evals-output {output} "
             f"--psycopg2-conn \"{psycopg2_conn}\" "
-            f"--slice-window {slice_window} "
+            f"--eval-batch-size {eval_batch_size} "
         )
+
+        if use_workload_table_estimate is not None:
+            eval_args += f"--use-workload-table-estimate "
+
+        if compute_frames is not None:
+            eval_args += f"--compute-frames {compute_frames} "
 
         if session_sql is not None:
             eval_args = eval_args + f"--session-sql {session_sql} "
+
+        if scratch_space is not None:
+            eval_args += f"--dir-scratch {scratch_space} "
 
         return f"python3 -m behavior eval_query_workload {eval_args}"
 
@@ -509,12 +457,6 @@ def task_behavior_eval_query_workload():
         "verbosity": VERBOSITY_DEFAULT,
         "uptodate": [False],
         "params": [
-            {
-                "name": "benchmark",
-                "long": "benchmark",
-                "help": "Benchmark that is being evaluated.",
-                "default": None,
-            },
             {
                 "name": "session_sql",
                 "long": "session_sql",
@@ -546,9 +488,33 @@ def task_behavior_eval_query_workload():
                 "default": None,
             },
             {
-                "name": "slice_window",
-                "long": "slice_window",
-                "help": "Slice of the window that should be processed.",
+                "name": "compute_frames",
+                "long": "compute_frames",
+                "help": "Whether to compute frames on the fly.",
+                "default": None,
+            },
+            {
+                "name": "eval_batch_size",
+                "long": "eval_batch_size",
+                "help": "Size of OU files to batch evaluate.",
+                "default": 16,
+            },
+            {
+                "name": "use_workload_table_estimate",
+                "long": "use_workload_table_estimate",
+                "help": "Whether to use the workload model to estimate table statistics.",
+                "default": None,
+            },
+            {
+                "name": "scratch_space",
+                "long": "scratch_space",
+                "help": "Space to use for the temporary files.",
+                "default": None,
+            },
+            {
+                "name": "output",
+                "long": "output",
+                "help": "Path to the output directory that should be used.",
                 "default": None,
             },
         ],
@@ -557,12 +523,27 @@ def task_behavior_eval_query_workload():
 
 def task_behavior_eval_query_plots():
     """
-    Behavior modeling: generate plots from eval_query analysis.
+    Behavior modeling: generate plots from eval_query[_workload] analysis.
     """
-    def eval_cmd():
+    def eval_cmd(input_dir, txn_analysis_file, generate_summary, generate_holistic, generate_per_query, generate_predict_abs_errors):
         eval_args = (
-            f"--dir-input {ARTIFACT_EVALS_QUERY} "
+            f"--dir-input {input_dir} "
         )
+
+        vals = [
+            ("--generate-summary", generate_summary),
+            ("--generate-holistic", generate_holistic),
+            ("--generate-per-query", generate_per_query),
+            ("--generate-predict-abs-errors", generate_predict_abs_errors),
+        ]
+
+        for (k, v) in vals:
+            if v is not None and v != "False":
+                eval_args += f"{k} "
+
+        if txn_analysis_file is not None:
+            assert Path(txn_analysis_file).exists()
+            eval_args += f"--txn-analysis-file {txn_analysis_file} "
 
         return f"python3 -m behavior eval_query_plots {eval_args}"
 
@@ -570,22 +551,113 @@ def task_behavior_eval_query_plots():
         "actions": [CmdAction(eval_cmd, buffering=1)],
         "verbosity": VERBOSITY_DEFAULT,
         "uptodate": [False],
+        "params": [
+            {
+                "name": "input_dir",
+                "long": "input_dir",
+                "help": "Path to root folder containing the input data to plot.",
+                "default": None,
+            },
+            {
+                "name": "txn_analysis_file",
+                "long": "txn_analysis_file",
+                "help": "Path to transaction analysis file.",
+                "default": None,
+            },
+            {
+                "name": "generate_summary",
+                "long": "generate_summary",
+                "help": "Whether to generate summary error information.",
+                "default": None,
+            },
+            {
+                "name": "generate_holistic",
+                "long": "generate_holistic",
+                "help": "Whether to generate holistic KDE plots of the errors.",
+                "default": None,
+            },
+            {
+                "name": "generate_per_query",
+                "long": "generate_per_query",
+                "help": "Whether to generate per-query plots of the errors.",
+                "default": None,
+            },
+            {
+                "name": "generate_predict_abs_errors",
+                "long": "generate_predict_abs_errors",
+                "help": "Whether to generate abs errors against each table.",
+                "default": None,
+            },
+        ],
     }
 
 
-def task_behavior_eval_query_workload_plots():
+def task_behavior_eval_query_compare_plots():
     """
-    Behavior modeling: generate plots from eval_query_workload analysis.
+    Behavior modeling: generate plots from comparative workload analysis.
     """
-    def eval_cmd():
+    def eval_cmd(input_dir, input_names, dir_output, txn_analysis_file, generate_per_query, generate_predict_abs_errors):
         eval_args = (
-            f"--dir-input {ARTIFACT_EVALS_QUERY_WORKLOAD} "
+            f"--dir-input {input_dir} "
+            f"--input-names {input_names} "
+            f"--dir-output {dir_output} "
         )
 
-        return f"python3 -m behavior eval_query_workload_plots {eval_args}"
+        vals = [
+            ("--generate-per-query", generate_per_query),
+            ("--generate-predict-abs-errors", generate_predict_abs_errors),
+        ]
+
+        for (k, v) in vals:
+            if v is not None and v != "False":
+                eval_args += f"{k} "
+
+        if txn_analysis_file is not None:
+            assert Path(txn_analysis_file).exists()
+            eval_args += f"--txn-analysis-file {txn_analysis_file} "
+
+        return f"python3 -m behavior eval_query_compare_plots {eval_args}"
 
     return {
         "actions": [CmdAction(eval_cmd, buffering=1)],
         "verbosity": VERBOSITY_DEFAULT,
         "uptodate": [False],
+        "params": [
+            {
+                "name": "input_dir",
+                "long": "input_dir",
+                "help": "Path to root folder containing the input data to plot.",
+                "default": None,
+            },
+            {
+                "name": "input_names",
+                "long": "input_names",
+                "help": "Names of the input models.",
+                "default": None,
+            },
+            {
+                "name": "dir_output",
+                "long": "dir_output",
+                "help": "Path to folder for output.",
+                "default": None,
+            },
+            {
+                "name": "txn_analysis_file",
+                "long": "txn_analysis_file",
+                "help": "Path to transaction analysis file.",
+                "default": None,
+            },
+            {
+                "name": "generate_per_query",
+                "long": "generate_per_query",
+                "help": "Whether to generate per-query plots of the errors.",
+                "default": None,
+            },
+            {
+                "name": "generate_predict_abs_errors",
+                "long": "generate_predict_abs_errors",
+                "help": "Whether to generate abs errors against each table.",
+                "default": None,
+            },
+        ],
     }

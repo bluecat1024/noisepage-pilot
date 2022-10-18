@@ -266,20 +266,39 @@ for workload in "${workload_directory}"/*; do
                 fi
             fi
 
+            postmaster_pid=$(pidof postgres | xargs -n1 | sort | head -n1)
+            if [ ! -z "$taskset_postgres" ] && [ "$taskset_postgres" != 'None' ];
+            then
+                taskset -pc $taskset_postgres $postmaster_pid
+            fi
+
+            if [ "$snapshot_metadata" == 'True' ];
+            then
+                ${psql} --dbname=benchbase --csv --command="SELECT EXTRACT(epoch from NOW()) as time, * FROM pg_stats s JOIN information_schema.columns c ON s.tablename=c.table_name AND s.attname=c.column_name WHERE s.schemaname = 'public';" > "${benchmark_output}/pg_stats.csv.${i}"
+                ${psql} --dbname=benchbase --csv --command="SELECT EXTRACT(epoch from NOW()) as time, * FROM pg_class t JOIN pg_namespace n ON n.oid = t.relnamespace WHERE n.nspname = 'public';" > "${benchmark_output}/pg_class.csv.${i}"
+                ${psql} --dbname=benchbase --csv --command="SELECT EXTRACT(epoch from NOW()) as time, * FROM pg_attribute;" > "${benchmark_output}/pg_attribute.csv.${i}"
+            fi
+
             if [ "$enable_collector" != 'False' ];
             then
                 # Initialize collector. We currently don't have a means by which to check whether
                 # collector has successfully attached to the instance. As such, we (wait) 10 seconds.
-                doit collector_init --benchmark="${benchmark}" --output_dir="${benchmark_output}" --wait_time=10 --collector_interval=30
+                doit collector_init --benchmark="${benchmark}" --output_dir="${benchmark_output}" --wait_time=60 --collector_interval=30 --pid=$postmaster_pid
+            elif [ "$snapshot_metadata" == 'True' ];
+            then
+                # Copy metadata into collector files.
+                cp "{benchmark_output}/pg_stats.csv.${i}" "${benchmark_output}/pg_stats.csv"
+                cp "{benchmark_output}/pg_class.csv.${i}" "${benchmark_output}/pg_class.csv"
+                cp "{benchmark_output}/pg_attribute.csv.${i}" "${benchmark_output}/pg_attribute.csv"
             fi
 
             # Execute the benchmark
-            doit benchbase_run --benchmark="${benchmark}" --config="${benchbase_config_path}" --args="--execute=true"
+            doit benchbase_run --benchmark="${benchmark}" --config="${benchbase_config_path}" --args="--execute=true" --taskset_benchbase="$taskset_benchbase"
 
             if [ "$enable_collector" != 'False' ];
             then
                 # Shutdown collector.
-                doit collector_shutdown
+                doit collector_shutdown --output_dir="${benchmark_output}"
             fi
 
             if [ ${i} == $((${#benchbase_configs[@]} - 1)) ];
@@ -290,7 +309,7 @@ for workload in "${workload_directory}"/*; do
                 ${psql} --dbname=benchbase --csv --command="SELECT * FROM pg_catalog.pg_qss_plans;" > "${plans_file}"
                 ${psql} --dbname=benchbase --csv --command="SELECT * FROM pg_catalog.pg_qss_ddl;" > "${ddl_file}"
                 ${psql} --dbname=benchbase --csv --variable="FETCH_COUNT=131072" --command="SELECT * FROM pg_catalog.pg_qss_stats;" > /tmp/pg_qss_stats.csv
-                sort -t, -n -k4,4 -k5,5 /tmp/pg_qss_stats.csv -o "${stats_file}"
+                sort -t, -n -k5,5 -k6,6 /tmp/pg_qss_stats.csv -o "${stats_file}"
             fi
 
             if [ ! -z "$post_execute" ];
@@ -310,6 +329,12 @@ for workload in "${workload_directory}"/*; do
             if [ -d "${log}" ] && [ "${continuous}" != 'True' ];
             then
                 mv "${PGDATA_LOCATION}/log" "${benchmark_output}/log.${i}"
+            elif [ -d "${log}" ];
+            then
+                # Make and move the log files.
+                mkdir "${benchmark_output}/log.${i}"
+                mv ${PGDATA_LOCATION}/log/* "${benchmark_output}/log.${i}/"
+                ${psql} --dbname=benchbase --csv --command="SELECT * FROM pg_rotate_logfile()"
             fi
 
             # Similarly, we move the corresponding benchmark's execution log from BenchBase to the

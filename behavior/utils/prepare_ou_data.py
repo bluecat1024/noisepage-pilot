@@ -1,13 +1,23 @@
 import pandas as pd
 import numpy as np
+from pathlib import Path
 from behavior import TARGET_COLUMNS
-from behavior.model_ous.process import DIFF_SCHEMA_METADATA
 
 
 # Any feature that ends with any keyword in BLOCKED_FEATURES is dropped
 # from the input schema. These features are intentionally dropped since
 # we don't want feature selection/model to try and learn from these.
-TRAILING_BLOCKED_FEATURES = DIFF_SCHEMA_METADATA + [
+TRAILING_BLOCKED_FEATURES = [
+    "ou_index",
+    "data_id",
+    "plan_node_id",
+    "query_id",
+    "db_id",
+    "statement_timestamp",
+    "pid",
+    "left_child_node_id",
+    "right_child_node_id",
+
     "plan_type",
     "cpu_id",
     "relid",
@@ -15,10 +25,11 @@ TRAILING_BLOCKED_FEATURES = DIFF_SCHEMA_METADATA + [
     "unix_timestamp",
     "relname",
     "relkind",
+    "generation",
 ]
 
 
-def purify_index_input_data(df):
+def prepare_index_input_data(df):
     # This logic is used to replace all the indkey n_distinct_ data (make it positive).
     distinct_keys = [col for col in df.columns if "indkey_n_distinct_" in col]
     filter_check = lambda x: x >= 0
@@ -68,7 +79,7 @@ def purify_index_input_data(df):
     return df
 
 
-def clean_input_data(df, settings, stats, is_train):
+def clean_input_data(df, is_train):
     """
     Function prepares input data for an OU.
 
@@ -76,35 +87,9 @@ def clean_input_data(df, settings, stats, is_train):
     ----------
     df : DataFrame
         Input (train/test) data for an operating unit.
-    settings : DataFrame
-        Dataframe for corresponding settings data with timestamps and identifiers.
-    stats : DataFrame
-        Dataframe for corresponding stats data with timestamps and identifiers.
     is_train : bool
         Whether dataframe is used for training. Columns are not dropped for non training dataframes.
     """
-    # join against the settings.
-    if "pg_settings_identifier" in df.columns:
-        df.set_index(keys=["pg_settings_identifier"], drop=True, append=False, inplace=True)
-        settings = settings.set_index(keys=["pg_settings_identifier"], drop=True, append=False)
-        df = df.join(settings, how="inner")
-        df.reset_index(drop=True, inplace=True)
-
-    # join against the stats identifier...this is a bit sadness but ok!
-    stats_ids = [key for key in df.columns if "indkey_statsid_" in key]
-    if len(stats_ids) != 0:
-        stats = stats.set_index(keys=["pg_stats_identifier"], drop=True, append=False)
-        stats.drop(labels=["time", "tablename", "attname"], axis=1, inplace=True)
-
-        for idx, stats_id_key in enumerate(stats_ids):
-            df.set_index(keys=[stats_id_key], drop=True, append=False, inplace=True)
-            df = df.join(stats, how="left")
-            df.reset_index(drop=True, inplace=True)
-
-            # rename the columns that were just inserted.
-            remapper = {column:f"indkey_{column}_{idx}" for column in stats.columns}
-            df.rename(columns=remapper, inplace=True)
-
     # Remove all features that are blocked.
     blocked = [col for col in df.columns for block in TRAILING_BLOCKED_FEATURES if col.endswith(block)]
 
@@ -113,34 +98,55 @@ def clean_input_data(df, settings, stats, is_train):
     blocked.extend([
         "unix_timestamp",
         "time",
+        "txn",
+        "payload",
+        "comment",
 
+        "indexrelid",
+        "indrelid",
         "relname",
         "relnatts", # redundant since just # of key+include in index attributes
+        "table_oid",
+        "table_reltoastrelid",
         "table_relname",
         "table_relkind",
+        "tablename",
+        "attname",
         # indnatts - # of key+include in index attributes
         # indnkeyatts - # of key in index attributes
         # table_relnatts -- # of attributes in the table
     ])
 
     slot = [
+        "indkey_attrelid_",
         "indkey_slot_", # index of the pg_attribute
         "indkey_attname_", # name of the attribute
         "indkey_most_common_vals_", # most common vals
         "indkey_most_common_freqs_", # most common freqs
         "indkey_histogram_bounds_", # histogram bounds
+        "indkey_tablename_",
+        "indkey_attnum_",
     ]
+    blocked.extend([] if "indkey" not in df else ["indkey"])
     blocked.extend([col for col in df.columns for prefix in slot if prefix in col])
 
     # Eliminate all columns that end with OID
     blocked.extend([col for col in df.columns if col.endswith("oid")])
 
+    if df.shape[0] > 0:
+        varying_keys = [col for col in df.columns if "indkey_attvarying_" in col]
+        for key in varying_keys:
+            if df.dtypes[key] == "object":
+                df[key] = (df[key] == "t").astype(int)
+
+
     # Clean and perform any relevant operations on the input data.
-    df = purify_index_input_data(df)
+    df = prepare_index_input_data(df)
 
     # This is an OU-specific dataframe operation. Why? Well because we want the num_outer_loops
     # to handle the query-level "nested" behavior.
     if "IndexScan_num_outer_loops" in df.columns:
+        df["IndexScan_num_outer_loops"] = np.clip(df.IndexScan_num_outer_loops, 1, None)
         div_cols = TARGET_COLUMNS + ["IndexScan_num_iterator_used", "IndexScan_num_heap_fetches"]
         div_cols = [col for col in div_cols if col in df]
         if len(div_cols) > 0:
@@ -181,21 +187,152 @@ def clean_input_data(df, settings, stats, is_train):
     # Sort the DataFrame by column for uniform downstream outputs.
     df.sort_index(axis=1, inplace=True)
 
-    # Featurewiz expects the TARGET_COLUMNS to be at the end for some reason.
+    # Shift the target columns to the end.
     df = df[[c for c in df if c not in TARGET_COLUMNS] + [t for t in TARGET_COLUMNS if t in df]]
     return df
 
 
-def load_input_data(logger, path, source_map, is_train):
-    if logger:
-        logger.info("Prepping input data for file: %s", path)
+class OUDataLoader():
+    def _process(self, ou_file, chunk):
+        assert self.loaded == ou_file
 
-    settings = pd.read_feather(path.parent / "idx_pg_settings.feather")
-    stats = pd.read_feather(path.parent / "idx_pg_stats.feather")
+        if self.md_plans is not None:
+            initial = chunk.shape[0]
+            chunk.set_index(keys=["statement_timestamp"], inplace=True)
+            chunk.sort_index(axis=0, inplace=True)
+            chunk = pd.merge_asof(chunk, self.md_plans, left_index=True, right_index=True, by=["query_id", "generation", "db_id", "pid", "plan_node_id"])
+            chunk.reset_index(drop=False, inplace=True)
+            chunk.drop(chunk[chunk.indicator.isna()].index, inplace=True)
+            chunk.drop(columns=["indicator"], inplace=True)
 
-    df = clean_input_data(pd.read_feather(path), settings, stats, is_train)
+            # There can only be less, not more.
+            assert chunk.shape[0] <= initial
 
-    file_idx = len(source_map) + 1
-    source_map[file_idx] = path.name
-    df["source_file"] = file_idx
-    return df
+        if self.md_settings is not None:
+            initial = chunk.shape[0]
+            chunk.set_index(keys=["unix_timestamp"], inplace=True)
+            chunk.sort_index(axis=0, inplace=True)
+            chunk = pd.merge_asof(chunk, self.md_settings, left_index=True, right_index=True)
+            chunk.reset_index(drop=False, inplace=True)
+            chunk.drop(chunk[chunk.pg_settings_identifier.isna()].index, inplace=True)
+            chunk.drop(columns=["pg_settings_identifier"], inplace=True)
+            assert chunk.shape[0] <= initial
+
+        if self.md_tbls is not None:
+            initial = chunk.shape[0]
+            chunk.set_index(keys=["unix_timestamp"], inplace=True)
+            chunk.sort_index(axis=0, inplace=True)
+            chunk = pd.merge_asof(chunk, self.md_tbls, left_index=True, right_index=True, left_by=["ModifyTable_target_oid"], right_by=["oid"])
+            chunk.reset_index(drop=False, inplace=True)
+            chunk.drop(chunk[chunk.oid.isna()].index, inplace=True)
+            assert chunk.shape[0] <= initial
+
+        if self.md_idx is not None:
+            initial = chunk.shape[0]
+            col = ("IndexScan_indexid" if "IndexScan_indexid" in chunk else ("IndexOnlyScan_indexid" if "IndexOnlyScan_indexid" in chunk else "ModifyTableIndexInsert_indexid"))
+            assert col in chunk
+
+            if col == "ModifyTableIndexInsert_indexid":
+                chunk.drop(columns=["total_cost", "startup_cost"], inplace=True)
+
+            chunk.set_index(keys=["unix_timestamp"], inplace=True)
+            chunk.sort_index(axis=0, inplace=True)
+            chunk = pd.merge_asof(chunk, self.md_idx, left_index=True, right_index=True, left_by=[col], right_by=["indexrelid"])
+            chunk.reset_index(drop=False, inplace=True)
+            chunk.drop(chunk[chunk.indexrelid.isna()].index, inplace=True)
+            assert chunk.shape[0] <= initial
+
+        chunk.reset_index(drop=True, inplace=True)
+        chunk = clean_input_data(chunk, self.train)
+        chunk["data_identifier"] = chunk.index
+        return chunk
+
+    def _load_metadata(self, ou_file):
+        if self.loaded == ou_file:
+            return
+
+        self.md_plans = None
+        self.md_settings = None
+        self.md_idx = None
+        self.md_tbls = None
+
+        # Here we make assumptions of the files on disk.
+        ou = Path(ou_file)
+        if (ou.parent / f"{ou.stem}_plan.csv").exists():
+            self.md_plans = pd.read_csv(ou.parent / f"{ou.stem}_plan.csv")
+            self.md_plans["indicator"] = 1
+            self.md_plans.drop(columns=["query_text"], inplace=True, errors='ignore')
+            self.md_plans.set_index(keys=["statement_timestamp"], inplace=True)
+            self.md_plans.sort_index(axis=0, inplace=True)
+
+        if (ou.parent / f"{ou.stem}_tbls.csv").exists():
+            self.md_tbls = pd.read_csv(ou.parent / f"{ou.stem}_tbls.csv")
+            self.md_tbls.set_index(keys=["unix_timestamp"], inplace=True)
+            self.md_tbls.sort_index(axis=0, inplace=True)
+
+        if (ou.parent / f"{ou.stem}_settings.csv").exists():
+            self.md_settings = pd.read_csv(ou.parent / f"{ou.stem}_settings.csv")
+            self.md_settings.set_index(keys=["unix_timestamp"], inplace=True)
+            self.md_settings.sort_index(axis=0, inplace=True)
+
+        if (ou.parent / f"{ou.stem}_idx.csv").exists():
+            self.md_idx = pd.read_csv(ou.parent / f"{ou.stem}_idx.csv")
+            self.md_idx.set_index(keys=["unix_timestamp"], inplace=True)
+            self.md_idx.sort_index(axis=0, inplace=True)
+
+        self.loaded = ou_file
+
+
+    def __init__(self, logger, ou_files, chunksize, train):
+        super(OUDataLoader, self).__init__()
+
+        self.logger = logger
+        self.ou_files = ou_files
+        self.chunksize = chunksize
+        self.train = train
+
+        self.it = None
+        self.finished = False;
+        self.loaded = None
+
+        self.md_plans = None
+        self.md_settings = None
+        self.md_idx = None
+        self.md_tbls = None
+
+    def get_next_data(self):
+        if self.finished == True:
+            return None
+
+        data = None
+        while (data is None or data.shape[0] == 0) and len(self.ou_files) > 0:
+            current_file = self.ou_files[0]
+            self._load_metadata(current_file)
+
+            if self.chunksize is None:
+                data = pd.read_csv(current_file)
+                self.ou_files = self.ou_files[1:]
+            else:
+                if self.it is None:
+                    self.it = pd.read_csv(current_file, chunksize=self.chunksize)
+
+                try:
+                    data = self.it.get_chunk()
+                except StopIteration:
+                    data = None
+
+                if data is None or data.shape[0] == 0:
+                    # We have reached the end of the current file.
+                    self.ou_files = self.ou_files[1:]
+                    self.it = None
+
+            if data is not None:
+                # Try and process the data. We have this here becuase we could end up
+                # losing all the data if it is invalid.
+                data = self._process(current_file, data)
+
+        if (data is None or data.shape[0] == 0) and len(self.ou_files) == 0:
+            self.finished = True
+            return None
+
+        return data

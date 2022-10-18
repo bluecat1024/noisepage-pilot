@@ -119,10 +119,13 @@ def generate_workload(config, mode_dir, benchbase_path, postgresql_config_file):
         "pg_prewarm": config["pg_prewarm"],
         "continuous": config["continuous"],
         "snapshot_data": config["snapshot_data"],
+        "snapshot_metadata": config["snapshot_metadata"],
         "pg_configs": pg_configs,
         "benchbase_configs": benchbase_configs,
         "dump_db": config["dump_db"],
         "enable_collector": config["enable_collector"],
+        "taskset_postgres": config["taskset_postgres"],
+        "taskset_benchbase": config["taskset_benchbase"],
     }
 
     if "dump_db_path" in config and config["dump_db_path"] is not None:

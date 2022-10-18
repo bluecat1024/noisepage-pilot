@@ -1,3 +1,4 @@
+import gc
 from datetime import datetime
 import numpy as np
 import itertools
@@ -42,10 +43,7 @@ def create_plots(output_dir, method, raw_df, preds_path):
         plt.close()
 
 
-def main(dir_models, methods, dir_data, dir_evals_output, generate_plots):
-    eval_timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    base_output = dir_evals_output / f"eval_{eval_timestamp}"
-
+def main(dir_models, methods, dir_data, base_output, generate_plots):
     output_evals = base_output / "evals"
     output_evals.mkdir(parents=True, exist_ok=True)
     output_plots_path = None
@@ -64,7 +62,7 @@ def main(dir_models, methods, dir_data, dir_evals_output, generate_plots):
                 continue
 
         # Evaluation is expected of form [experiment]/[benchmark]/[OU].feather
-        for feather in dir_data.rglob('*.feather'):
+        for feather in dir_data.rglob('*.csv'):
             if feather.name.startswith(model.ou_name):
                 print("Evaluating ", model.method, model.ou_name, "on data", feather)
 
@@ -80,13 +78,16 @@ def main(dir_models, methods, dir_data, dir_evals_output, generate_plots):
                     output_plot_dir = output_plots_path / feather.parts[-2]
                     create_plots(output_plot_dir, model.method, preds_df, feather)
 
+                del preds_df
+                gc.collect()
+
 
 class EvalOUCLI(cli.Application):
     dir_data = cli.SwitchAttr(
         "--dir-data",
         Path,
         mandatory=True,
-        help="Folder containing evaluation CSVs. (structure: [experiment]/[benchmark]/*.feather)",
+        help="Folder containing evaluation CSVs. (structure: [experiment]/[benchmark]/*.csv)",
     )
     dir_evals_output = cli.SwitchAttr(
         "--dir-evals-output",

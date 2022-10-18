@@ -1,4 +1,6 @@
+import signal
 from plumbum import cli
+import pandas as pd
 import binascii
 import time
 import csv
@@ -13,6 +15,8 @@ from dataclasses import dataclass
 from distutils import util
 from enum import Enum, auto, unique
 
+from bcc import BPF, USDT
+
 import psutil
 import setproctitle
 import psycopg
@@ -22,11 +26,21 @@ from behavior.datagen.pg_collector_utils import SettingType, _time_unit_to_ms, _
 
 
 logger = logging.getLogger("collector")
+collector_pids = []
 
+
+def lost_something(num_lost):
+    # num_lost. pylint: disable=unused-argument
+    pass
+
+
+##################################################################3
+# USER SPACE COLLECTOR
+##################################################################3
 
 # Name of output file/target --> (query, frequent)
 PG_COLLECTOR_TARGETS = {
-    "pg_stats": "SELECT EXTRACT(epoch from NOW())*1000000 as time, pg_stats.* FROM pg_stats WHERE schemaname = 'public';",
+    "pg_stats": "SELECT EXTRACT(epoch from NOW())*1000000 as time, s.*, c.data_type FROM pg_stats s JOIN information_schema.columns c ON s.tablename=c.table_name AND s.attname=c.column_name WHERE schemaname = 'public';",
     "pg_class": "SELECT EXTRACT(epoch from NOW())*1000000 as time, * FROM pg_class t JOIN pg_namespace n ON n.oid = t.relnamespace WHERE n.nspname = 'public';",
     "pg_index": "SELECT EXTRACT(epoch from NOW())*1000000 as time, * FROM pg_index;",
     "pg_attribute": "SELECT EXTRACT(epoch from NOW())*1000000 as time, * FROM pg_attribute;",
@@ -76,6 +90,11 @@ def pg_collector(output_rows, output_columns, slow_time, shutdown):
 
     setproctitle.setproctitle("Userspace Collector Process")
     with psycopg.connect("host=localhost port=5432 dbname=benchbase user=wz2", autocommit=True) as connection:
+        with connection.cursor() as cursor:
+            global collector_pids
+            pid = [r for r in cursor.execute("SELECT pg_backend_pid()")][0][0]
+            collector_pids.append(pid)
+
         # Poll on the Collector's output buffer until Collector is shut down.
         while not shutdown.is_set():
             try:
@@ -99,8 +118,115 @@ def pg_collector(output_rows, output_columns, slow_time, shutdown):
 
     logger.info("Userspace Collector shut down.")
 
+##################################################################3
+# POSTGRES MONITOR
+##################################################################3
 
-def main(benchmark, outdir, collector_interval):
+def monitor_postgres_pid(pid):
+    with open("behavior/datagen/probe_templates/postgres_probe.c", "r", encoding="utf-8") as f:
+        postgres_probe_c = f.read()
+
+    probes = USDT(pid=pid)
+    for probe in ["fork_backend", "reap_backend"]:
+        probes.enable_probe(probe=probe, fn_name=probe)
+
+    return BPF(text=postgres_probe_c, usdt_contexts=[probes], cflags=['-DKBUILD_MODNAME="tscout"'])
+
+def postmaster_event_cb(postgres_bpf, histograms, processes, collector_flags):
+    def postmaster_event(cpu, data, size):
+        def create_collector(child_pid, socket_fd=None):
+            logger.info("Postmaster forked PID %s, creating its Collector.", child_pid)
+            collector_flags[child_pid] = True
+            collector_process = mp.Process(
+                target=collector, args=(histograms, collector_flags, child_pid, socket_fd)
+            )
+            collector_process.start()
+            processes[child_pid] = collector_process
+
+        def destroy_collector(collector_process, child_pid):
+            logger.info("Postmaster reaped PID %s, destroying its Collector.", child_pid)
+            collector_flags[child_pid] = False
+            collector_process.join()
+            del collector_flags[child_pid]
+            del processes[child_pid]
+
+        # cpu, size. pylint: disable=unused-argument
+        output_event = postgres_bpf["postmaster_events"].event(data)
+        event_type = output_event.type_
+        child_pid = output_event.pid_
+        if event_type == 0:
+            fd = output_event.socket_fd_ if event_type == 0 else None
+            create_collector(child_pid, fd)
+        elif event_type  == 1:
+            collector_process = processes.get(child_pid)
+            if collector_process:
+                destroy_collector(collector_process, child_pid)
+        else:
+            logger.error("Unknown event type from Postmaster.")
+            raise KeyboardInterrupt
+    return postmaster_event
+
+##################################################################3
+# POSTGRES PER BACKEND COLLECTOR
+##################################################################3
+
+def collector(histograms, collector_flags, pid, socket_fd):
+    setproctitle.setproctitle(f"{pid} TScout Collector")
+
+    with open("behavior/datagen/probe_templates/probes.c", "r", encoding="utf-8") as markers:
+        markers_c = markers.read()
+
+    max_pid = int(open("/proc/sys/kernel/pid_max").read())
+    markers_c = markers_c.replace("MAX_PID", str(max_pid))
+    markers_c = markers_c.replace("TARGET_PID", str(pid))
+
+    markers = USDT(pid=pid)
+    marker_probes = USDT(pid=pid)
+    for probe in ["qss_ExecutorStart", "qss_ExecutorEnd", "qss_Block", "qss_Unblock"]:
+        marker_probes.enable_probe(probe=probe, fn_name=probe)
+
+    cflags = ['-DKBUILD_MODNAME="collector"']
+    collector_bpf = BPF(text=markers_c, usdt_contexts=[marker_probes], cflags=cflags)
+    collector_bpf.attach_kprobe(event="finish_task_switch", fn_name="sched_switch")
+    collector_bpf.attach_kprobe(event="vfs_read", fn_name="trace_read_entry")
+    collector_bpf.attach_kretprobe(event="vfs_read", fn_name="trace_read_return")
+    collector_bpf.attach_kprobe(event="vfs_write", fn_name="trace_write_entry")
+    collector_bpf.attach_kretprobe(event="vfs_write", fn_name="trace_write_return")
+
+    window_count = 0
+    hists = [(0, collector_bpf.get_table("dist0")), (1, collector_bpf.get_table("dist6")),  (2, collector_bpf.get_table("dist10")),]
+    while collector_flags[pid]:
+        try:
+            # No perf event, so just sleep...
+            if pid not in collector_pids:
+                for sl, histogram in hists:
+                    hist = { "time": time.time_ns() / 1000, "elapsed_slice": sl, "window_index": window_count, "pid": pid, }
+                    for i in range(1, 32):
+                        low = (1 << i) >> 1;
+                        high = (1 << i) - 1;
+                        if low == high:
+                            low -= 1
+                        key = f"{low}_{high}"
+
+                        try:
+                            hist[key] = histogram[i].value
+                        except:
+                            hist[key] = 0
+
+                    histograms.append(hist)
+                window_count += 1
+
+            # Try and get second level histogram resolutions.
+            # This way, we can build larger summaries.
+            time.sleep(1)
+        except KeyboardInterrupt:
+            logger.info("Collector for PID %s caught KeyboardInterrupt.", pid)
+        except Exception as e:  # pylint: disable=broad-except
+            logger.warning("Collector for PID %s caught %s.", pid, e)
+    logger.info("Collector for PID %s shut down.", pid)
+
+
+def main(benchmark, outdir, collector_interval, pid):
     keep_running = True
 
     # Augment with pgstattuple_approx data.
@@ -108,19 +234,24 @@ def main(benchmark, outdir, collector_interval):
     for tbl in tables:
         PG_COLLECTOR_TARGETS[tbl] = f"SELECT EXTRACT(epoch from NOW())*1000000 as time, * FROM pgstattuple_approx('{tbl}');"
 
+    # Monitor the postgres PID.
+    setproctitle.setproctitle("Main Collector Process")
+    postgres_bpf = monitor_postgres_pid(pid)
+
     with mp.Manager() as manager:
         # Create coordination data structures for Collectors and Processors
         collector_flags = manager.dict()
         collector_processes = {}
+        histograms = manager.list()
 
         shutdown = manager.Event()
 
+        # Start the userspace collector.
         pg_scrape_columns = manager.dict()
         pg_scrape_tuples = manager.dict()
         pg_scrape_tuples["pg_settings"] = manager.list()
         for target, _ in PG_COLLECTOR_TARGETS.items():
             pg_scrape_tuples[target] = manager.list()
-
         pg_collector_process = mp.Process(
             target=pg_collector,
             args=(
@@ -131,12 +262,16 @@ def main(benchmark, outdir, collector_interval):
             ),
         )
         pg_collector_process.start()
+        cb = postmaster_event_cb(postgres_bpf, histograms, collector_processes, collector_flags)
+        postgres_bpf["postmaster_events"].open_perf_buffer(callback=cb, lost_cb=lost_something)
+        print(f"TScout attached to PID {pid}.")
 
         while keep_running:
             try:
-                time.sleep(1)
+                postgres_bpf.perf_buffer_poll()
             except KeyboardInterrupt:
                 keep_running = False
+                signal.signal(signal.SIGINT, signal.SIG_IGN)
             except Exception as e:  # pylint: disable=broad-except
                 logger.warning("Collector caught %s.", e)
 
@@ -147,6 +282,13 @@ def main(benchmark, outdir, collector_interval):
         shutdown.set()
 
         pg_collector_process.join()
+        print("Shutdown Userspace Collector")
+
+        for pid, process in collector_processes.items():
+            collector_flags[pid] = False
+            process.join()
+            logger.info("Joined Collector for PID %s.", pid)
+        print("TScout joined all Collectors.")
 
         PG_COLLECTOR_TARGETS["pg_settings"] = None
         for target in PG_COLLECTOR_TARGETS.keys():
@@ -157,6 +299,10 @@ def main(benchmark, outdir, collector_interval):
                 if write_header:
                     writer.writerow(pg_scrape_columns[target])
                 writer.writerows(pg_scrape_tuples[target])
+
+        data = [hist for hist in histograms]
+        if len(data) > 0:
+            pd.DataFrame(data=data).fillna(0).to_csv(f"{outdir}/histograms.csv", index=False)
         print("Collector wrote out pg collector data.")
 
         # We're done.
@@ -187,8 +333,15 @@ class CollectorCLI(cli.Application):
         help="Training data output directory",
     )
 
+    pid = cli.SwitchAttr(
+        "--pid",
+        int,
+        mandatory=True,
+        help="Postmaster PID that we're attaching to.",
+    )
+
     def main(self):
-        main(self.benchmark, self.outdir, self.collector_interval)
+        main(self.benchmark, self.outdir, self.collector_interval, self.pid)
 
 
 if __name__ == "__main__":

@@ -156,7 +156,7 @@ def task_benchbase_run():
     BenchBase: run a specific benchmark.
     """
 
-    def invoke_benchbase(benchmark, config, args):
+    def invoke_benchbase(benchmark, config, args, taskset_benchbase):
         if config is None:
             config = ARTIFACTS_PATH / f"config/postgres/{benchmark}_config.xml"
         elif not config.startswith("/"):
@@ -164,7 +164,11 @@ def task_benchbase_run():
             # because we must be in the BenchBase folder for the java invocation to work out,
             # we need to get the original relative path that the caller intended.
             config = (Path(doit.get_initial_workdir()) / config).absolute()
-        return f"java -jar benchbase.jar -b {benchmark} -c {config} {args}"
+
+        cmd = f"java -jar benchbase.jar -b {benchmark} -c {config} {args}"
+        if taskset_benchbase is not None and taskset_benchbase != 'None':
+            cmd = f"taskset -c {taskset_benchbase} {cmd}"
+        return cmd
 
     return {
         "actions": [
@@ -198,6 +202,12 @@ def task_benchbase_run():
                 "long": "args",
                 "help": "Arguments to pass to BenchBase invocation.",
                 "default": "--create=false --load=false --execute=false",
+            },
+            {
+                "name": "taskset_benchbase",
+                "long": "taskset_benchbase",
+                "help": "CPU List to taskset benchbase to.",
+                "default": None,
             },
         ],
     }

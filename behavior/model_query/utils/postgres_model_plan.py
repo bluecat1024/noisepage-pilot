@@ -505,7 +505,7 @@ def generate_query_ous(window_queries, window_metadata, ff_tbl_change_map, conn,
 
             # Yoink all the OUs for a given query plan.
             plan_ous = []
-            ous = _evaluate_query_for_plan(conn, query.query_text)
+            ous = _evaluate_query_for_plan(conn, query.prepared_query_text)
             for ou in ous:
                 plan_ous.extend(_compute_derived_ous(conn, ou, ous, metadata, predictive))
 
@@ -648,15 +648,15 @@ def estimate_query_modifications(raw_query_stream, initial_metadata, skip_query=
         raw_query_stream["pred_elapsed_us"] = 0.0
         raw_query_stream["cum_start_time_us"] = 0.0
         raw_query_stream["modify_target"] = ""
+
+        mod_vec = (insert_vector | update_vector | delete_vector)
+        raw_query_stream.loc[mod_vec, "modify_target"] = raw_query_stream.loc[mod_vec, "target"]
+
         # Initially seed the number of modify entries as 1.
-        raw_query_stream["num_modify"] = (insert_vector | update_vector | delete_vector).astype(int)
+        raw_query_stream["num_modify"] = mod_vec.astype(int)
         raw_query_stream["is_insert"] = (insert_vector).astype(int)
         raw_query_stream["is_update"] = (update_vector).astype(int)
         raw_query_stream["is_delete"] = (delete_vector).astype(int)
-
-        for key in initial_metadata["pg_class"].keys():
-            key_contains = query_text.str.contains(key)
-            raw_query_stream.loc[key_contains, "modify_target"] = key
 
     for key in initial_metadata["pg_class"].keys():
         tbl_metadata = initial_metadata["pg_class"][key]

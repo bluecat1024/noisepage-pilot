@@ -21,7 +21,7 @@ from plumbum import cli
 
 from behavior import OperatingUnit, Targets, BENCHDB_TO_TABLES
 from behavior.utils.evaluate_ou import evaluate_ou_model
-from behavior.utils.prepare_ou_data import purify_index_input_data
+from behavior.utils.prepare_ou_data import prepare_index_input_data
 from behavior.model_query.utils.postgres import prepare_augmentation_data, prepare_pg_inference_state
 from behavior.model_query.utils.prepare_data import prepare_inference_query_stream
 from behavior.model_query.utils.postgres_model_plan import generate_vacuum_partition, generate_query_ous, estimate_query_modifications
@@ -96,7 +96,7 @@ def augment_ous(scratch_it, sliced_metadata, conn):
                 remapper = {column:f"indkey_{column}_{idx}" for column in time_pg_stats.columns}
                 data.rename(columns=remapper, inplace=True)
 
-            data = purify_index_input_data(data)
+            data = prepare_index_input_data(data)
             data.reset_index(drop=True, inplace=True)
             data.to_feather(scratch_it / f"AUG_{augment.name}.feather{Path(target_file).suffix}")
 
@@ -263,7 +263,7 @@ def main(benchmark, num_iterations, psycopg2_conn, session_sql, dir_models, dir_
                 # Load the relevant fill factor changes from pg_qss_ddl.
                 ddl = pd.read_csv(dir_data / "pg_qss_ddl.csv")
                 ddl = ddl[ddl.command == "AlterTableOptions"]
-                ff_tbl_change_map = {t: [] for t in TABLES}
+                ff_tbl_change_map = {t: [] for t in BENCHDB_TO_TABLES[benchmark]}
                 for tbl in BENCHDB_TO_TABLES[benchmark]:
                     query_str = ddl["query"].str
                     slots = query_str.contains(tbl) & query_str.contains("fillfactor")

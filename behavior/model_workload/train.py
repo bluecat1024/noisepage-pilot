@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader
 
 import logging
 from plumbum import cli
-from behavior.model_workload.model import WorkloadModel, MODEL_WORKLOAD_TARGETS
+from behavior.model_workload.model import WorkloadModel, MODEL_WORKLOAD_TABLE_STATS_TARGETS, MODEL_WORKLOAD_TARGETS
 
 
 logger = logging.getLogger("train")
@@ -40,7 +40,7 @@ def loss_fn(preds, labels):
     return loss(preds, labels)
 
 
-def print_loss(preds, labels):
+def print_loss(preds, labels, targets):
     loss_segs = []
     assert len(preds) > 0
     for j in range(len(preds[0])):
@@ -51,7 +51,7 @@ def print_loss(preds, labels):
         loss_segs.append(loss_seg)
 
     for i in range(len(loss_segs)):
-        logger.info("L1 Statistics for target: %s", MODEL_WORKLOAD_TARGETS[i])
+        logger.info("L1 Statistics for target: %s", targets[i])
         loss_seg = loss_segs[i]
 
         logger.info("Average: %s", np.mean(loss_seg))
@@ -64,44 +64,64 @@ def print_loss(preds, labels):
         logger.info("")
 
 
-def predict(model, data_loader, separate):
+def predict(model, data_loader, separate, model_targets, cuda):
     preds = []
     targets = []
 
+    if cuda:
+        model.cudify()
+
     for batch_idx, data_batch in enumerate(data_loader):
+        if cuda:
+            data_batch = [d.cuda() for d in data_batch]
+
         outputs = model.predict(*(data_batch[0:-1]))
-        target = [t for t in data_batch[-1]]
+        target = [t for t in data_batch[-1].float()]
+
+        if cuda:
+            outputs = [[i.cpu() for i in o] for o in outputs]
+            target = [t.cpu() for t in target]
 
         preds.extend(outputs)
         targets.extend(target)
 
-    print_loss(preds, targets)
+    print_loss(preds, targets, model_targets)
 
 
-def train(patterns, output_dir, separate, val_size, num_epochs, batch_size, hid_units):
-    train_data, val_data = get_dataset(patterns, val_size)
-    model = WorkloadModel()
-    model.init_model(hid_units, separate)
-
+def train(patterns, output_dir, separate, val_size, lr, num_epochs, batch_size, hid_units, hist_length, cuda, table_stats):
+    global logger
     Path(output_dir).mkdir(parents=True, exist_ok=True)
-    tmp_path = (Path(output_dir) / "tmp")
-    tmp_path.mkdir(parents=True, exist_ok=True)
-    tmp_path = tmp_path / "model.pt"
+    file_handler = logging.FileHandler(Path(output_dir) / "output.log", mode="w")
+    logger.addHandler(file_handler)
 
-    target_model, target_idx = model.get_next_model()
+    train_data, val_data = get_dataset(patterns, val_size)
+    targets = MODEL_WORKLOAD_TABLE_STATS_TARGETS if table_stats else MODEL_WORKLOAD_TARGETS
+    model = WorkloadModel()
+    model.init_model(hid_units, separate, hist_length, targets)
+
+    target_model, target_idx, target_name = model.get_next_model()
+    best_state_dict = None
     while target_model is not None:
         logger.info("Beginning to train model with target_idx: %s", target_idx)
-        optimizer = torch.optim.Adam(target_model.parameters(), lr=0.001)
+        if Path(f"{output_dir}/{target_name}").exists():
+            best_state_dict = torch.load(f"{output_dir}/{target_name}")
+            target_model.load_state_dict(best_state_dict, strict=False)
+            logger.info("Loaded trained model from saved path (%s)", target_name)
+            target_model, target_idx, target_name = model.get_next_model()
+            continue
+
+        optimizer = torch.optim.Adam(target_model.parameters(), lr=lr)
         process_train_data = model.prepare_inputs(train_data, target_idx=target_idx, train=True)
         train_data_loader = DataLoader(process_train_data, batch_size=batch_size)
 
-        if val_data is not None:
-            process_val_data = model.prepare_inputs(val_data, target_idx=target_idx, train=True)
-            val_data_loader = DataLoader(process_val_data, batch_size=batch_size)
-
         # Begin training the model over the number of epochs.
+        if cuda:
+            target_model.cuda()
         target_model.train()
+
         max_loss = None
+        last_loss = 0
+        repeats = 0
         for epoch in range(num_epochs):
             loss_total = 0.
 
@@ -110,6 +130,9 @@ def train(patterns, output_dir, separate, val_size, num_epochs, batch_size, hid_
 
                 optimizer.zero_grad()
                 # We guarantee that the last element in the batch is the targets.
+                if cuda:
+                    variables = [v.cuda() for v in variables]
+
                 outputs = target_model(*(variables[0:-1]))
                 loss = loss_fn(outputs, variables[-1].float())
                 loss_total += loss.item()
@@ -121,12 +144,25 @@ def train(patterns, output_dir, separate, val_size, num_epochs, batch_size, hid_
             # Save the "best" by lowest loss.
             if max_loss is None or loss_total < max_loss:
                 max_loss = loss_total
-                torch.save(target_model.state_dict(), tmp_path)
+                best_state_dict = target_model.state_dict()
+
+            if last_loss == loss_total:
+                repeats = repeats + 1
+            else:
+                repeats = 0
+
+            if repeats > 100:
+                # Early constant stopping
+                break
+
+            last_loss = loss_total
 
         # Implant the "best" back into the state.
-        state_dict = torch.load(tmp_path)
-        target_model.load_state_dict(state_dict, strict=False)
-        target_model, target_idx = model.get_next_model()
+        assert best_state_dict is not None
+        target_model.load_state_dict(best_state_dict, strict=False)
+        model.save_partial(output_dir, target_idx)
+
+        target_model, target_idx, target_name = model.get_next_model()
 
     model.save(output_dir)
 
@@ -136,13 +172,13 @@ def train(patterns, output_dir, separate, val_size, num_epochs, batch_size, hid_
 
         # Get final training and validation set predictions
         logger.info("Training Loss Information:")
-        predict(model, train_data_loader, separate)
+        predict(model, train_data_loader, separate, targets, cuda)
 
         if val_data is not None:
             logger.info("Validation Loss Information:")
             process_val_data = model.prepare_inputs(val_data, target_idx=None, train=True)
             val_data_loader = DataLoader(process_val_data, batch_size=batch_size)
-            predict(model, val_data_loader, separate)
+            predict(model, val_data_loader, separate, targets, cuda)
 
 
 class WorkloadTrainCLI(cli.Application):
@@ -164,6 +200,13 @@ class WorkloadTrainCLI(cli.Application):
         "--separate",
         str,
         help="Whether to train a separate model for each target or train a combined model",
+    )
+
+    lr = cli.SwitchAttr(
+        "--lr",
+        float,
+        default=0.001,
+        help="Learning rate for Adam optimizer.",
     )
 
     val_size = cli.SwitchAttr(
@@ -190,8 +233,27 @@ class WorkloadTrainCLI(cli.Application):
         help="Number of hidden units to use.",
     )
 
+    hist_length = cli.SwitchAttr(
+        "--hist-length",
+        int,
+        mandatory=True,
+        help="Size of the histogram that describes the data.",
+    )
+
+    cuda = cli.Flag(
+        "--cuda",
+        default=False,
+        help="Whether to use CUDA.",
+    )
+
+    table_stats = cli.Flag(
+        "--table-stats",
+        default=False,
+        help="Whether to create a model that can perform table stats inference.",
+    )
+
     def main(self):
-        train(self.dir_input, self.dir_output, self.separate == "True", self.val_size, self.epochs, self.batch_size, self.hidden_size)
+        train(self.dir_input, self.dir_output, self.separate == "True", self.val_size, self.lr, self.epochs, self.batch_size, self.hidden_size, self.hist_length, self.cuda, self.table_stats)
 
 
 if __name__ == "__main__":

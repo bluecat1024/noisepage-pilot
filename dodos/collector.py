@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 
 from plumbum import cmd, local
+from plumbum.cmd import sudo
 
 from dodos import VERBOSITY_DEFAULT
 from dodos.noisepage import BUILD_PATH, ARTIFACT_pg_ctl
@@ -14,7 +15,9 @@ def task_collector_init():
     Collector: attach collector to a running NoisePage instance.
     """
 
-    def start_collector(benchmark, output_dir, wait_time, collector_interval):
+    def start_collector(benchmark, output_dir, wait_time, collector_interval, pid):
+        assert pid is not None
+
         if output_dir is None:
             print("Unable to start collector without an output directory")
             return False
@@ -35,10 +38,12 @@ def task_collector_init():
             "--outdir",
             output_dir,
             "--collector_interval",
-            collector_interval
+            collector_interval,
+            "--pid",
+            pid
         ]
 
-        local["python3"][arguments].run_bg(
+        sudo[local["python3"][arguments]].run_bg(
             # sys.stdout will actually give the doit writer. Here we need the actual
             # underlying output stream.
             stdout=sys.__stdout__,
@@ -77,6 +82,12 @@ def task_collector_init():
                 "help": "Interval (seconds) to collect (infrequent) information from database.",
                 "default": 30,
             },
+            {
+                "name": "pid",
+                "long": "pid",
+                "help": "Postmaster PID that we're attaching to.",
+                "default": None,
+            },
         ],
     }
 
@@ -86,18 +97,30 @@ def task_collector_shutdown():
     Collector: shutdown the running collector instance.
     """
 
-    def shutdown_collector():
-        local["pkill"]["-SIGINT", "-i", "-f", "behavior collector"](retcode=None)
-        local["pkill"]["-SIGINT", "-i", "-f", "Userspace Collector"](retcode=None)
+    def shutdown_collector(output_dir):
+        sudo["pkill", "-SIGINT", "-i", "-f", "Main Collector"](retcode=None)
         while len(list(local.pgrep("behavior collector"))) != 0:
             print("Waiting for collector to shutdown from SIGINT.")
             time.sleep(5)
+            sudo["pkill", "-SIGINT", "-i", "-f", "Main Collector"](retcode=None)
 
         print("Shutdown collector with SIGINT.")
+        owner = Path(__file__).owner()
+        if Path(output_dir).exists():
+            print(f"Taking ownership of: {output_dir}")
+            cmd.sudo["chown", "--recursive", owner, output_dir]()
 
     return {
         "actions": [shutdown_collector],
         "file_dep": [ARTIFACT_pg_ctl],
         "uptodate": [False],
         "verbosity": VERBOSITY_DEFAULT,
+        "params": [
+            {
+                "name": "output_dir",
+                "long": "output_dir",
+                "help": "Directory that tscout should output to",
+                "default": None,
+            },
+        ]
     }

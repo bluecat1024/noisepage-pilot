@@ -7,8 +7,7 @@ from enum import Enum, auto, unique
 import pandas as pd
 import numpy as np
 
-from behavior.feature_selection import featurize
-from behavior.utils.prepare_ou_data import load_input_data
+from behavior.utils.prepare_ou_data import OUDataLoader
 from sklearn.metrics import (
     mean_absolute_error,
     mean_absolute_percentage_error,
@@ -49,18 +48,14 @@ def evaluate_ou_model(model, output_dir, benchmark, eval_file=None, eval_df=None
 
     if eval_file is not None:
         # Load the input OU file that we want to evaluate.
-        input_data = load_input_data(None, eval_file, {}, False)
-        df = featurize.extract_input_features(input_data, model.features)
+        # Load the entire input in and do evaluation.
+        input_data = OUDataLoader(logger=None, ou_files=[eval_file], chunksize=None, train=False).get_next_data()
     else:
         input_data = eval_df
-        df = featurize.extract_input_features(eval_df, model.features)
         eval_file = Path(model.ou_name)
 
-    # Extract X and true Y's
-    X = df.values
-
     # Run inference.
-    y_pred = model.predict(X)
+    y_pred = model.predict(input_data)
 
     # Write out the predictions.
     if output:
@@ -80,6 +75,8 @@ def evaluate_ou_model(model, output_dir, benchmark, eval_file=None, eval_df=None
             )
             test_result_df["source_file"] = test_result_df.source_file.astype(str)
             test_result_df.to_feather(preds_file)
+            del temp
+            del test_result_df
 
         with open(output_dir / f"{model.method}_{benchmark}_{eval_file.stem}_stats.txt", "w+") as ou_eval_file:
             ou_eval_file.write(
