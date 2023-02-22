@@ -43,7 +43,7 @@ def generate_holistic(query_stream, dir_output):
 
 def generate_per_query_plots(query_stream, dir_output):
     # Output error distribution plots based on query_id.
-    qid_groups = query_stream.groupby(by=["query_id"])
+    qid_groups = query_stream.groupby(by=["query_text"])
     for group in qid_groups:
         logger.info("Processing query %s", group[0])
         fig, axes = plt.subplots(2, 1, figsize=(25.6, 14.4))
@@ -52,8 +52,8 @@ def generate_per_query_plots(query_stream, dir_output):
 
         # Plot elapsed and predicted elapsed time on the same graph as a scatter.
         x_title = "order" if "order" in query_stream else "query_order"
-        group[1].plot.scatter(title=f"qid: {group[0]}", x=x_title, y="elapsed_us", color='r', ax=ax)
-        group[1].plot.scatter(title=f"qid: {group[0]}", x=x_title, y="pred_elapsed_us", color='b', ax=ax)
+        group[1].plot.scatter(title=f"qid: {group[1]['query_id'].min()}", x=x_title, y="elapsed_us", color='r', ax=ax)
+        group[1].plot.scatter(title=f"qid: {group[1]['query_id'].min()}", x=x_title, y="pred_elapsed_us", color='b', ax=ax)
         ax.set_xticks([])
 
         if len(group[1]) > 1 and len(group[1].predicted_minus_elapsed.value_counts()) > 1:
@@ -68,7 +68,7 @@ def generate_per_query_plots(query_stream, dir_output):
             ax.scatter(percents, np.zeros(len(percentiles)), color='g')
             ax.set_xlabel("predicted - elapsed")
 
-        plt.savefig(dir_output / f"{group[0]}.png")
+        plt.savefig(dir_output / f"{group[0][:240]}.png")
         plt.close()
 
 
@@ -260,6 +260,8 @@ def generate_txn_plots(query_stream, output_dir, txn_analysis_file):
                 if valid_txn_name is not None:
                     break
 
+            if valid_txn_name is None:
+                continue
             assert valid_txn_name is not None, print(txn_queries.query_text)
             txn_groupings[valid_txn_name].append({"txn_elapsed_us": txn_queries.elapsed_us.sum(), "txn_pred_elapsed_us": txn_queries.pred_elapsed_us.sum()})
 
