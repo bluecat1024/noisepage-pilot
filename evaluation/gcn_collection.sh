@@ -26,7 +26,7 @@ _inject_benchbase_config() {
   xmlstarlet edit --inplace --update '/parameters/password' --value "${DB_PASS}" ./artifacts/project/${benchmark}_config.xml
   xmlstarlet edit --inplace --update '/parameters/isolation' --value "TRANSACTION_REPEATABLE_READ" ./artifacts/project/${benchmark}_config.xml
   xmlstarlet edit --inplace --update '/parameters/scalefactor' --value "${scalefactor}" ./artifacts/project/${benchmark}_config.xml
-  xmlstarlet edit --inplace --update '/parameters/works/work/time' --value "3600" ./artifacts/project/${benchmark}_config.xml
+  xmlstarlet edit --inplace --update '/parameters/works/work/time' --value "86400" ./artifacts/project/${benchmark}_config.xml
   xmlstarlet edit --inplace --update '/parameters/works/work/rate' --value "unlimited" ./artifacts/project/${benchmark}_config.xml
 }
 
@@ -43,7 +43,7 @@ _setup_benchmark() {
   xmlstarlet edit --inplace --update '/parameters/username' --value "${DB_USER}" ./artifacts/project/${benchmark}_config.xml
   xmlstarlet edit --inplace --update '/parameters/password' --value "${DB_PASS}" ./artifacts/project/${benchmark}_config.xml
   xmlstarlet edit --inplace --update '/parameters/scalefactor' --value "${scalefactor}" ./artifacts/project/${benchmark}_config.xml
-  xmlstarlet edit --inplace --update '/parameters/works/work/time' --value "60" ./artifacts/project/${benchmark}_config.xml
+  xmlstarlet edit --inplace --update '/parameters/works/work/time' --value "86400" ./artifacts/project/${benchmark}_config.xml
   xmlstarlet edit --inplace --update '/parameters/works/work/rate' --value "unlimited" ./artifacts/project/${benchmark}_config.xml
 
   # Load the benchmark into the project database.
